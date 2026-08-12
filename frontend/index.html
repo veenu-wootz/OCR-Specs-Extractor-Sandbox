@@ -438,6 +438,41 @@
             /* color:#eaeaea !important; */
         }
 
+        /* Rows already written to Glide by a partially-completed submit.
+           Read-only because the backend has no update mutation. */
+        .handsontable td.row-locked {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        /* Action buttons injected into the notification bar */
+        .notif-action {
+            margin-left: 10px;
+            padding: 2px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            color: inherit;
+            background: transparent;
+            border: 1px solid currentColor;
+            border-radius: 4px;
+            cursor: pointer;
+            opacity: 0.9;
+        }
+
+        .notif-action:hover {
+            opacity: 1;
+        }
+
+        #autosave-badge {
+            margin-right: 10px;
+            padding: 2px 8px;
+            font-size: 11px;
+            color: #f0b429;
+            border: 1px solid #f0b429;
+            border-radius: 4px;
+            white-space: nowrap;
+        }
+
         .handsontable td.type-missing-childpart {
             color:#fc5f67 !important;
             font-weight: 600 !important;
@@ -1387,6 +1422,284 @@ let isAppendMode = false; // Track append mode state
 let lastOcrBomItem = 0;
 let rowID = null;
 
+// ═══════════════════════════════════════════════════════════════════════
+// Draft persistence + resumable submit state
+// ═══════════════════════════════════════════════════════════════════════
+const DRAFT_PREFIX = 'ocrdraft:v1:';
+const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;   // 24h
+const DRAFT_SAVE_DEBOUNCE_MS = 500;
+const OCR_COLS = ["Quantity", "Description", "Material"];
+
+let _lockedRows  = new Set();  // physical row indices already written to Glide
+let _submitState = null;       // see buildSubmitState()
+let _draftReady  = false;      // guards saves during boot / restore
+let _saveTimer   = null;
+let _restoredThisLoad = false; // suppresses the default-instructions banner
+
+/**
+ * Storage adapter. Every read/write goes through here so a remote backend can
+ * be dropped in later without touching a single call site.
+ * Chrome/Edge/Firefox partition third-party iframe storage (works fine).
+ * Safari may make it ephemeral or block it — we degrade instead of throwing.
+ */
+const DraftStore = (function () {
+    let raw = null;
+    let kind = 'none';
+
+    function memoryStore() {
+        const m = new Map();
+        return {
+            getItem: k => (m.has(k) ? m.get(k) : null),
+            setItem: (k, v) => m.set(k, String(v)),
+            removeItem: k => m.delete(k),
+            keys: () => Array.from(m.keys())
+        };
+    }
+
+    // window.name survives a reload of the same browsing context and is not
+    // subject to third-party storage policy. Lost when the frame is destroyed.
+    function windowNameStore() {
+        const MARK = '__ocrdraft__';
+        const read = () => {
+            try {
+                const parsed = JSON.parse(window.name || '{}');
+                return (parsed && parsed[MARK]) ? parsed : { [MARK]: true };
+            } catch (e) { return { [MARK]: true }; }
+        };
+        const write = obj => { window.name = JSON.stringify(obj); };
+        return {
+            getItem: k => { const o = read(); return (k in o) ? o[k] : null; },
+            setItem: (k, v) => { const o = read(); o[k] = String(v); write(o); },
+            removeItem: k => { const o = read(); delete o[k]; write(o); },
+            keys: () => Object.keys(read()).filter(k => k !== MARK)
+        };
+    }
+
+    function wrapWebStorage(s) {
+        return {
+            getItem: k => s.getItem(k),
+            setItem: (k, v) => s.setItem(k, v),
+            removeItem: k => s.removeItem(k),
+            keys: () => { const out = []; for (let i = 0; i < s.length; i++) out.push(s.key(i)); return out; }
+        };
+    }
+
+    // Every candidate must survive a real write/read/remove round-trip before we
+    // accept it. Constructing one proves nothing: window.name in particular only
+    // throws on first use, which would otherwise swallow saves silently.
+    (function probe() {
+        const candidates = [
+            ['localStorage',   () => wrapWebStorage(window.localStorage)],
+            ['sessionStorage', () => wrapWebStorage(window.sessionStorage)],
+            ['window.name',    () => windowNameStore()],
+            ['memory',         () => memoryStore()],
+        ];
+        for (const [name, make] of candidates) {
+            try {
+                const cand = make();
+                const pk = '__ocrprobe__';
+                cand.setItem(pk, '1');
+                const ok = cand.getItem(pk) === '1';
+                cand.removeItem(pk);
+                if (ok) { raw = cand; kind = name; return; }
+            } catch (e) { /* blocked — try the next one */ }
+        }
+        raw = memoryStore(); kind = 'memory';
+    })();
+
+    return {
+        kind: () => kind,
+        durable: () => kind === 'localStorage',
+        get(key) {
+            try { const s = raw.getItem(key); return s ? JSON.parse(s) : null; }
+            catch (e) { console.warn('[draft] read failed', e); return null; }
+        },
+        set(key, value) {
+            const json = JSON.stringify(value);
+            try { raw.setItem(key, json); return true; }
+            catch (e) {
+                // Quota exceeded: purge oldest drafts and retry.
+                try {
+                    const others = raw.keys()
+                        .filter(k => k.startsWith(DRAFT_PREFIX) && k !== key)
+                        .map(k => {
+                            let t = 0;
+                            try { t = (JSON.parse(raw.getItem(k)) || {}).savedAt || 0; } catch (_) { }
+                            return { k, t };
+                        })
+                        .sort((a, b) => a.t - b.t);
+                    for (const { k } of others) {
+                        raw.removeItem(k);
+                        try { raw.setItem(key, json); return true; } catch (_) { /* keep purging */ }
+                    }
+                } catch (e2) { /* fall through */ }
+                console.warn('[draft] write failed', e);
+                return false;
+            }
+        },
+        remove(key) { try { raw.removeItem(key); } catch (e) { } },
+        sweep(ttlMs) {
+            try {
+                const now = Date.now();
+                raw.keys().filter(k => k.startsWith(DRAFT_PREFIX)).forEach(k => {
+                    let savedAt = 0;
+                    try { savedAt = (JSON.parse(raw.getItem(k)) || {}).savedAt || 0; } catch (_) { }
+                    if (!savedAt || now - savedAt > ttlMs) raw.removeItem(k);
+                });
+            } catch (e) { /* nothing to sweep */ }
+        }
+    };
+})();
+
+// `item` is deliberately NOT part of the key: it changes after every submit
+// and would orphan the draft the user is still working on.
+function draftKey() {
+    const p = new URLSearchParams(window.location.search);
+    return DRAFT_PREFIX + [
+        p.get('project') || '', p.get('part') || '',
+        p.get('parentdrgnum') || '', p.get('rowID') || ''
+    ].join('|');
+}
+
+function currentItemParam() {
+    const p = new URLSearchParams(window.location.search);
+    return parseInt(p.get('item') || '0', 10) || 0;
+}
+
+function blankRow() {
+    return {
+        "PartNumber": { text: "", confidence: 0 },
+        "Type": "",
+        "Matched Childpart": "",
+        Quantity: { text: "", confidence: 0 },
+        Description: { text: "", confidence: 0 },
+        Material: { text: "", confidence: 0 },
+    };
+}
+
+function isRowBlank(row) {
+    if (!row) return true;
+    if ((row.Type || '').trim()) return false;
+    if ((row["Matched Childpart"] || '').toString().trim()) return false;
+    if ((row.PartNumber?.text || '').trim()) return false;
+    return !OCR_COLS.some(c => (row[c]?.text || '').trim());
+}
+
+// minSpareRows keeps appending an empty row to the data source; without this
+// trim the table would grow by one row on every save→restore cycle.
+function rowsForSave() {
+    const rows = spreadsheetData.slice();
+    while (rows.length && isRowBlank(rows[rows.length - 1])) rows.pop();
+    return rows;
+}
+
+// Rebuild each restored row onto a known-good shape rather than trusting
+// whatever came out of storage (drafts may predate a schema tweak).
+function normalizeRow(rawRow) {
+    const base = blankRow();
+    if (!rawRow || typeof rawRow !== 'object') return base;
+    base.Type = typeof rawRow.Type === 'string' ? rawRow.Type : '';
+    base["Matched Childpart"] = rawRow["Matched Childpart"] != null ? rawRow["Matched Childpart"] : '';
+    ["PartNumber", ...OCR_COLS].forEach(c => {
+        const v = rawRow[c];
+        if (v && typeof v === 'object') {
+            base[c] = {
+                text: typeof v.text === 'string' ? v.text : '',
+                confidence: Number(v.confidence) || 0
+            };
+            if (v.ocr) base[c].ocr = true;
+        }
+    });
+    // Keep the `delete`-style semantics: absent, never null.
+    if (rawRow._needsReview) base._needsReview = true;
+    if (rawRow._missingDrawing) base._missingDrawing = true;
+    if (typeof rawRow._similarityScore === 'number') base._similarityScore = rawRow._similarityScore;
+    return base;
+}
+
+function saveDraftNow() {
+    if (!_draftReady) return;
+    clearTimeout(_saveTimer); _saveTimer = null;
+    DraftStore.set(draftKey(), {
+        v: 1,
+        savedAt: Date.now(),
+        item: currentItemParam(),
+        rows: rowsForSave(),
+        submitState: _submitState
+    });
+}
+
+function scheduleDraftSave() {
+    if (!_draftReady) return;
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(saveDraftNow, DRAFT_SAVE_DEBOUNCE_MS);
+}
+
+function loadDraft() {
+    const d = DraftStore.get(draftKey());
+    if (!d || !d.savedAt) return null;
+    if (Date.now() - d.savedAt > DRAFT_TTL_MS) { DraftStore.remove(draftKey()); return null; }
+    return d;
+}
+
+function clearDraft() {
+    clearTimeout(_saveTimer); _saveTimer = null;
+    _submitState = null;
+    _lockedRows = new Set();
+    DraftStore.remove(draftKey());
+}
+
+function describeAge(ms) {
+    const mins = Math.round(ms / 60000);
+    if (mins < 1) return 'just now';
+    if (mins === 1) return '1 minute ago';
+    if (mins < 60) return `${mins} minutes ago`;
+    const hrs = Math.round(mins / 60);
+    return hrs === 1 ? '1 hour ago' : `${hrs} hours ago`;
+}
+
+// Rows already written to Glide become read-only — there is no update
+// mutation wired, so an edit here could never reach Glide.
+function recomputeLockedRows() {
+    _lockedRows = new Set();
+    if (!_submitState) return;
+    ['childParts', 'boParts'].forEach(stageName => {
+        const st = _submitState[stageName];
+        if (st && st.status === 'done') {
+            (st.payload || []).forEach(r => {
+                if (typeof r._pRow === 'number') _lockedRows.add(r._pRow);
+            });
+        }
+    });
+}
+
+function hasUnresolvedSubmit() {
+    if (!_submitState) return false;
+    return ['childParts', 'pdfs', 'boParts'].some(k => {
+        const st = _submitState[k];
+        return st && (st.status === 'pending' || st.status === 'failed');
+    });
+}
+
+// showNotification() overwrites textContent, so action buttons live as
+// siblings inside the notification area rather than inside the text node.
+function clearNotificationActions() {
+    document.querySelectorAll('#notification-area .notif-action').forEach(b => b.remove());
+}
+
+function addNotificationAction(label, onClick) {
+    const area = document.getElementById('notification-area');
+    if (!area) return null;
+    const btn = document.createElement('button');
+    btn.className = 'notif-action';
+    btn.type = 'button';
+    btn.textContent = label;
+    btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    const closeBtn = document.getElementById('notification-close');
+    if (closeBtn) area.insertBefore(btn, closeBtn); else area.appendChild(btn);
+    return btn;
+}
+
 // === One-shot notification gate (pre-submit live notifications) ===
 // We gate refreshes that come from renderers/live validation so they don't
 // stomp success/info banners or thrash during frequent re-renders.
@@ -1493,8 +1806,9 @@ function isDuplicateChildpartSelection(value, rowIndex) {
             // Always initialize Handsontable
             console.log("🎨 Initializing Handsontable...");
             initializeHandsontable();
-// Ensure default instructions are visible on startup
-showDefaultInstructions();
+// Ensure default instructions are visible on startup — unless a draft was
+// restored, whose banner would otherwise be immediately clobbered.
+if (!_restoredThisLoad) showDefaultInstructions();
         });
 
         // Sequential character matching + best‐match utility
@@ -1826,7 +2140,91 @@ showDefaultInstructions();
                 "Material",
             ];
 
+            // --- Draft restore -------------------------------------------------
+            // Must happen BEFORE renderSpreadsheet(), which destroys and rebuilds
+            // the Handsontable instance around whatever spreadsheetData holds.
+            DraftStore.sweep(DRAFT_TTL_MS);
+            let restored = null;
+            try {
+                const draft = loadDraft();
+                if (draft && Array.isArray(draft.rows) && draft.rows.length) {
+                    spreadsheetData = draft.rows.map(normalizeRow);
+                    while (spreadsheetData.length < 5) spreadsheetData.push(blankRow());
+                    _submitState = draft.submitState || null;
+                    recomputeLockedRows();
+                    restored = draft;
+                    // Hold the gate closed so renderer-driven warning refreshes
+                    // don't stomp the restore banner before it's even shown.
+                    // The first user edit calls resetNotificationGate() as usual.
+                    _notifGate.active = true;
+                }
+            } catch (e) {
+                console.error('[draft] restore failed, starting clean', e);
+                _submitState = null;
+                _lockedRows = new Set();
+            }
+
             renderSpreadsheet();
+
+            // Only start autosaving once the table is in its final boot state.
+            _draftReady = true;
+
+            _restoredThisLoad = !!restored;
+            if (restored) {
+                replayEditedCellMeta();
+                announceRestore(restored);
+            }
+            if (!DraftStore.durable()) markAutosaveUnavailable();
+        }
+
+        // Nothing visual depends on this — an edited cell carries confidence 0,
+        // which renders as the same #0a0a0a the default td background already
+        // uses. Replayed so the meta stays truthful for future renderer changes.
+        function replayEditedCellMeta() {
+            if (!hot) return;
+            spreadsheetData.forEach((row, r) => {
+                OCR_COLS.forEach(colKey => {
+                    const cell = row?.[colKey];
+                    if (!cell || !cell.ocr) return;
+                    if ((cell.confidence || 0) !== 0) return;
+                    if (!(cell.text || '').trim()) return;
+                    const colIndex = hot.propToCol(colKey + '.text');
+                    if (colIndex == null || colIndex < 0) return;
+                    const existing = hot.getCellMeta(r, colIndex).className || '';
+                    const classes = new Set(existing.split(/\s+/).filter(Boolean));
+                    classes.add('edited-cell');
+                    classes.add('user-edited-ocr');
+                    hot.setCellMeta(r, colIndex, 'className', Array.from(classes).join(' '));
+                });
+            });
+            hot.render();
+        }
+
+        function announceRestore(draft) {
+            const age = describeAge(Date.now() - draft.savedAt);
+            if (hasUnresolvedSubmit()) { announceUnresolvedSubmit(); return; }
+            clearNotificationActions();
+            showNotification(`Restored your unsaved work from ${age}.`, 'success', 0);
+            addNotificationAction('Start fresh', () => {
+                clearDraft();
+                clearNotificationActions();
+                _draftReady = false;
+                initializeHandsontable();
+                showDefaultInstructions();
+            });
+        }
+
+        function markAutosaveUnavailable() {
+            console.warn(`[draft] non-durable storage in use: ${DraftStore.kind()}`);
+            const area = document.getElementById('table-action-buttons');
+            if (!area || document.getElementById('autosave-badge')) return;
+            const badge = document.createElement('span');
+            badge.id = 'autosave-badge';
+            badge.textContent = DraftStore.kind() === 'memory'
+                ? 'Autosave unavailable'
+                : 'Autosave: this session only';
+            badge.title = 'This browser restricts storage for embedded pages, so your work may not survive closing the app.';
+            area.insertBefore(badge, area.firstChild);
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -2127,9 +2525,18 @@ showDefaultInstructions();
                 cells: function(row, col) {
                   const cellProperties = {};
                   const rowData = spreadsheetData[row];
+                  const classes = [];
                   if (rowData && rowData.Type === "BO") {
-                    cellProperties.className = 'bo-row';
+                    classes.push('bo-row');
                   }
+                  // Already written to Glide by a partially-completed submit.
+                  // Lock rather than let an edit be silently dropped — the
+                  // backend only ever adds rows, it cannot update them.
+                  if (_lockedRows.has(row)) {
+                    cellProperties.readOnly = true;
+                    classes.push('row-locked');
+                  }
+                  if (classes.length) cellProperties.className = classes.join(' ');
                   return cellProperties;
                 },
 
@@ -2272,6 +2679,17 @@ showDefaultInstructions();
                   });
                 },
             });
+            // --- Draft autosave hooks -------------------------------------------
+            // Registered separately from the big afterChange handler below: that
+            // one has several early returns, so a save tacked onto its end would
+            // be skipped on the cut/copy/paste paths.
+            hot.addHook('afterChange', (changes, source) => {
+                if (!changes || source === 'CopyPaste.copy') return;
+                scheduleDraftSave();
+            });
+            hot.addHook('afterCreateRow', () => scheduleDraftSave());
+            hot.addHook('afterRemoveRow', () => scheduleDraftSave());
+
             // --- keep current value when opening Type / Matched Childpart editors
             hot.addHook('afterBeginEditing', function (row, col) {
               const prop = this.colToProp(col);
@@ -2750,9 +3168,19 @@ showDefaultInstructions();
             } else {
                 renderSpreadsheet();
             }
-        
+
             refreshNotifications(); // ← Check for warnings after OCR processing
+            saveDraftNow();         // ← expensive OCR just landed; persist immediately
         }
+        // Flush pending saves when the frame is backgrounded or torn down.
+        // visibilitychange is the reliable signal on mobile; pagehide/beforeunload
+        // are best-effort extras.
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') saveDraftNow();
+        });
+        window.addEventListener('pagehide', () => saveDraftNow());
+        window.addEventListener('beforeunload', () => saveDraftNow());
+
         // ─────────────────────────────────────────────────────────────────────
         // OCR Uploads: Multiple zones, event delegation, state per column
         // ─────────────────────────────────────────────────────────────────────
@@ -3033,6 +3461,9 @@ showDefaultInstructions();
             const icon = document.getElementById('notification-icon');
             const text = document.getElementById('notification-text');
 
+            // Drop any action buttons belonging to the previous message
+            clearNotificationActions();
+
             // Set content
             text.textContent = message;
 
@@ -3059,6 +3490,7 @@ showDefaultInstructions();
         }
 
         function hideNotification() {
+            clearNotificationActions();
             document.getElementById('notification-area').className = 'notification-hidden';
         }
 // --- Default instructions text (single source of truth) ---
@@ -3407,7 +3839,142 @@ document.addEventListener('DOMContentLoaded', () => {
         window.childPartsData = [];
         window.boData = [];
 
-        async function sendDataToBackend() {
+        // Payload rows carry a _pRow marker so locked rows can be identified after
+        // a reload. It must never reach the backend.
+        function stripInternal(rows) {
+            return (rows || []).map(r => {
+                const { _pRow, ...rest } = r;
+                return rest;
+            });
+        }
+
+        // Build the three stages from the current table. Only called for a FRESH
+        // submit — a resume replays the frozen payloads instead.
+        function buildSubmitState() {
+            const childRows = [];
+            const boRows = [];
+            const missingParts = [];
+
+            for (let vRow = 0; vRow < hot.countRows(); vRow++) {
+                const pRow = hot.toPhysicalRow(vRow);   // map visual → physical
+                if (pRow == null) continue;             // skip spare / trimmed rows
+
+                const row = spreadsheetData[pRow];
+                const qty = row.Quantity?.text?.trim();
+                const type = row.Type?.trim();
+
+                // Skip completely empty or incomplete rows
+                if (!qty && !type) continue;
+                if (!qty || !type) continue;
+
+                if (type === "Child Part" || type === TYPE_DISPLAY_NAMES["Missing Childpart"]) {
+                    childRows.push({
+                        _pRow: pRow,
+                        itemNumber: lastOcrBomItem + vRow + 1,
+                        quantity: qty,
+                        description: row.Description?.text?.trim() || "",
+                        material: row.Material?.text?.trim() || "",
+                        drawingNumber: (row["Matched Childpart"] || "").replaceAll(".", ""),  //also change in backend at matchedPart in missing Drawing
+                        ocrWarning: getRowWarning(row)
+                    });
+                    if (type === TYPE_DISPLAY_NAMES["Missing Childpart"]) {
+                        missingParts.push(row["Matched Childpart"] || "");
+                    }
+                } else if (type === "BO") {
+                    boRows.push({
+                        _pRow: pRow,
+                        itemNumber: lastOcrBomItem + vRow + 1,
+                        quantity: qty,
+                        description: row.Description?.text?.trim() || "",
+                        material: row.Material?.text?.trim() || "",
+                        boughtoutPartNumber: row["Matched Childpart"] || "",
+                        ocrWarning: getRowWarning(row)
+                    });
+                }
+            }
+
+            let maxItemNumber = lastOcrBomItem;
+            [...childRows, ...boRows].forEach(item => {
+                maxItemNumber = Math.max(maxItemNumber, item.itemNumber);
+            });
+
+            return {
+                submissionId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                startedAt: Date.now(),
+                itemBase: lastOcrBomItem,
+                maxItemNumber,
+                childParts: { status: childRows.length ? 'todo' : 'skipped', payload: childRows },
+                pdfs: { status: missingParts.length ? 'todo' : 'skipped', remaining: missingParts, done: [] },
+                boParts: { status: boRows.length ? 'todo' : 'skipped', payload: boRows }
+            };
+        }
+
+        // A locked row that no longer matches what was sent means an edit slipped
+        // past readOnly (paste/autofill/undo can). Surface it — that edit can
+        // never reach Glide, because the backend has no update mutation.
+        function divergedLockedRows() {
+            const diverged = [];
+            ['childParts', 'boParts'].forEach(stageName => {
+                const st = _submitState?.[stageName];
+                if (!st || st.status !== 'done') return;
+                (st.payload || []).forEach(sent => {
+                    const row = spreadsheetData[sent._pRow];
+                    if (!row) return;
+                    const nowQty = row.Quantity?.text?.trim() || "";
+                    const nowDesc = row.Description?.text?.trim() || "";
+                    const nowMat = row.Material?.text?.trim() || "";
+                    if (nowQty !== sent.quantity || nowDesc !== sent.description || nowMat !== sent.material) {
+                        diverged.push(sent.itemNumber);
+                    }
+                });
+            });
+            return diverged;
+        }
+
+        function announceUnresolvedSubmit() {
+            const done = [];
+            const outstanding = [];
+            if (_submitState.childParts?.status === 'done') done.push('Child Parts');
+            if (_submitState.pdfs?.status === 'done') done.push('Missing-drawing PDFs');
+            if (_submitState.boParts?.status === 'done') done.push('BO Parts');
+            ['childParts', 'pdfs', 'boParts'].forEach(k => {
+                const st = _submitState[k];
+                if (!st || st.status === 'done' || st.status === 'skipped') return;
+                outstanding.push({ childParts: 'Child Parts', pdfs: 'Missing-drawing PDFs', boParts: 'BO Parts' }[k]);
+            });
+
+            // Weak signal only: both endpoints bump the same counter, so an
+            // advance proves at least one stage landed, never which one.
+            const pending = ['childParts', 'pdfs', 'boParts'].filter(k => _submitState[k]?.status === 'pending');
+            let hint = '';
+            if (pending.length && currentItemParam() >= (_submitState.maxItemNumber || 0)) {
+                hint = ' Some data may already have been saved — check Glide before resending.';
+            }
+
+            clearNotificationActions();
+            showNotification(
+                `Previous submission did not finish.${done.length ? ` Already saved: ${done.join(', ')}.` : ''}` +
+                `${outstanding.length ? ` Not yet saved: ${outstanding.join(', ')}.` : ''}${hint}`,
+                'warning', 0
+            );
+            addNotificationAction('Send remaining', () => {
+                clearNotificationActions();
+                sendDataToBackend({ resume: true });
+            });
+            addNotificationAction('Discard', () => {
+                // Stops trying to finish this submission. Does NOT undo anything
+                // already written to Glide — nothing here can.
+                clearNotificationActions();
+                clearDraft();
+                if (hot) hot.render();
+                showNotification('Stopped. Rows already saved to Glide remain there.', 'success');
+            });
+        }
+
+        async function sendDataToBackend(opts = {}) {
+            // Any Submit press while a submission is unresolved CONTINUES it.
+            // Rebuilding here would re-send stages that already reached Glide.
+            const resume = !!opts.resume || hasUnresolvedSubmit();
             const addDataBtn = document.getElementById("submit-btn");
             const originalText = addDataBtn.textContent;
 
@@ -3415,17 +3982,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Provide some visual feedback (you can customize as needed)
                 addDataBtn.disabled = true;
                 addDataBtn.textContent = "Sending...";
-                // Validate required fields:
-                const validation = validateRequiredFields();
-                if (!validation.isValid) {
-                    showNotification(
-                        `Missing Data:\n${validation.missingFields.join(
-                            ", "
-                        )}`, 'error'
-                    );
-                    addDataBtn.disabled = false;
-                    addDataBtn.textContent = originalText;
-                    return;
+
+                if (!resume) {
+                    // Validate required fields:
+                    const validation = validateRequiredFields();
+                    if (!validation.isValid) {
+                        showNotification(
+                            `Missing Data:\n${validation.missingFields.join(
+                                ", "
+                            )}`, 'error'
+                        );
+                        addDataBtn.disabled = false;
+                        addDataBtn.textContent = originalText;
+                        return;
+                    }
                 }
 
                 const urlParams = new URLSearchParams(window.location.search);
@@ -3436,178 +4006,189 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error("Missing required URL params");
                 }
 
-                // Build ChildParts & BO arrays **in the visual row order**
-                // const childPartsData = [];
-                // const boData = [];
-                childPartsData.length = 0;  // reset
-                boData.length = 0;
-
-                for (let vRow = 0; vRow < hot.countRows(); vRow++) {
-                    const pRow = hot.toPhysicalRow(vRow);   // map visual → physical
-                    if (pRow == null) continue;             // skip spare / trimmed rows
-
-                    const row = spreadsheetData[pRow];
-                    const qty = row.Quantity?.text?.trim();
-                    const type = row.Type?.trim();
-
-                    // Skip completely empty or incomplete rows
-                    if (!qty && !type) continue;
-                    if (!qty || !type) continue;
-
-                    if (type === "Child Part" || type === TYPE_DISPLAY_NAMES["Missing Childpart"]) {
-                        childPartsData.push({
-                            itemNumber: lastOcrBomItem + vRow + 1,
-                            quantity: qty,
-                            description: row.Description?.text?.trim() || "",
-                            material: row.Material?.text?.trim() || "",
-                            drawingNumber: (row["Matched Childpart"] || "").replaceAll(".", ""),  //also change in backend at matchedPart in missing Drawing
-                            ocrWarning: getRowWarning(row)
-                        });
-                    } else if (type === "BO") {
-                        boData.push({
-                            itemNumber: lastOcrBomItem + vRow + 1,
-                            quantity: qty,
-                            description: row.Description?.text?.trim() || "",
-                            material: row.Material?.text?.trim() || "",
-                            boughtoutPartNumber: row["Matched Childpart"] || "",
-                            ocrWarning: getRowWarning(row)
-                        });
+                if (resume && _submitState) {
+                    const diverged = divergedLockedRows();
+                    if (diverged.length) {
+                        showNotification(
+                            `Item ${diverged.join(', ')} already saved to Glide — edits made here won't update it. Correct it in Glide directly.`,
+                            'warning', 0
+                        );
                     }
-                }
-
-                // Calculate the maximum item number from all data
-                let maxItemNumber = lastOcrBomItem; // Start with current value
-                [...childPartsData, ...boData].forEach(item => {
-                    maxItemNumber = Math.max(maxItemNumber, item.itemNumber);
-                });
-
-                // ADD THIS CONSOLE LOG:
-                console.log("📊 Item Number Calculation:");
-                console.log("  Base lastOcrBomItem:", lastOcrBomItem);
-                console.log("  Calculated maxItemNumber:", maxItemNumber);
-                console.log("  Total items:", [...childPartsData, ...boData].length);
-
-                // Send to backend
-                let successful = 0,
-                    total = 0;
-
-                if (childPartsData.length) {
-                    total++;
-                    const respChild = await fetch(
-                          ENDPOINTS.addChildParts,
-                        {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                                rows: childPartsData,
-                                project,
-                                parentDrawingNumber,
-                                partNumber,
-                                rowID: rowID,
-                                maxItemNumber: maxItemNumber
-                            }),
-                        }
-                    );
-                    if (!respChild.ok) {
-                        throw new Error(`Failed to add Child Parts: ${await respChild.text()}`);
-                    }
-                    successful++;
-
-                    // Check for Missing Childpart rows and trigger PDF generation for each
-                    const missingChildpartRows = [];
-                    for (let vRow = 0; vRow < hot.countRows(); vRow++) {
-                        const pRow = hot.toPhysicalRow(vRow);
-                        if (pRow == null) continue;
-                        const row = spreadsheetData[pRow];
-                        const type = row.Type?.trim();
-                        const qty = row.Quantity?.text?.trim();
-                        
-                        // Only process rows with data and Missing Childpart type
-                        if (type === TYPE_DISPLAY_NAMES["Missing Childpart"] && qty) {
-                            missingChildpartRows.push(row["Matched Childpart"] || "");
-                        }
-                    }
-
-                    if (missingChildpartRows.length > 0) {
-                        console.log(`📄 Generating ${missingChildpartRows.length} PDFs for missing childparts`);
-                        
-                        // Generate PDF for each missing childpart
-                        const pdfPromises = missingChildpartRows.map(async (matchedPart) => {
-                            try {
-                                const pdfUrl =
-  `${ENDPOINTS.generateMissingChildpartPdf}` +
-  `?project=${encodeURIComponent(project)}` +
-  `&part=${encodeURIComponent(partNumber)}`;
-
-const pdfResp = await fetch(
-  pdfUrl,
-  {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      matchedPart: matchedPart
-    }),
-  }
-);
-
-                                
-                                if (pdfResp.ok) {
-                                    console.log(`✅ Missing childpart PDF generated successfully for: ${matchedPart}`);
-                                    return true;
-                                } else {
-                                    console.warn(`⚠️ PDF generation failed for ${matchedPart}:`, await pdfResp.text());
-                                    return false;
-                                }
-                            } catch (pdfError) {
-                                console.error(`❌ PDF generation error for ${matchedPart}:`, pdfError);
-                                return false;
-                            }
-                        });
-                        
-                        // Wait for all PDFs to complete
-                        const results = await Promise.all(pdfPromises);
-                        const successful = results.filter(r => r).length;
-                        
-                        if (successful > 0) {
-                            console.log(`✅ Generated ${successful} missing childpart PDFs successfully`);
-                        }
-                    }
-
-                }
-                if (boData.length) {
-                    total++;
-                    const respBo = await fetch(
-                            ENDPOINTS.addBoParts,
-                        {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                                rows: boData,
-                                project,
-                                parentDrawingNumber,
-                                partNumber,
-                                rowID: rowID,
-                                maxItemNumber: maxItemNumber
-                            }),
-                        }
-                    );
-                    if (!respBo.ok) {
-                        throw new Error(`Failed to add BO Parts: ${await respBo.text()}`);
-                    }
-                    successful++;
-                }
-
-                if (successful === total && total > 0) {
-                    showNotification(
-                        `Data added successfully!\n- Child Parts: ${childPartsData.length}\n- BO Parts: ${boData.length}`, 'success'
-                    );
-                    clearTableToDefault();
                 } else {
+                    _submitState = buildSubmitState();
+                    recomputeLockedRows();
+                    saveDraftNow();
+                }
+
+                const childPartsPayload = _submitState.childParts.payload || [];
+                const boPartsPayload = _submitState.boParts.payload || [];
+                const maxItemNumber = _submitState.maxItemNumber;
+
+                if (!childPartsPayload.length && !boPartsPayload.length) {
                     throw new Error("No data was processed");
                 }
+
+                // Keep the legacy debug globals populated, matching what actually
+                // goes over the wire (no internal _pRow marker).
+                childPartsData.length = 0;
+                boData.length = 0;
+                stripInternal(childPartsPayload).forEach(r => childPartsData.push(r));
+                stripInternal(boPartsPayload).forEach(r => boData.push(r));
+
+                console.log("📊 Item Number Calculation:");
+                console.log("  Base lastOcrBomItem:", _submitState.itemBase);
+                console.log("  Calculated maxItemNumber:", maxItemNumber);
+                console.log("  Total items:", childPartsPayload.length + boPartsPayload.length);
+
+                // ── Stage 1: Child Parts ───────────────────────────────────
+                // Skipped outright when a previous attempt already landed it —
+                // this is what stops a retry duplicating rows in Glide.
+                if (_submitState.childParts.status === 'todo' || _submitState.childParts.status === 'failed') {
+                    _submitState.childParts.status = 'pending';
+                    saveDraftNow();
+                    let respChild;
+                    try {
+                        respChild = await fetch(
+                              ENDPOINTS.addChildParts,
+                            {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    rows: stripInternal(childPartsPayload),
+                                    project,
+                                    parentDrawingNumber,
+                                    partNumber,
+                                    rowID: rowID,
+                                    maxItemNumber: maxItemNumber
+                                }),
+                            }
+                        );
+                    } catch (netErr) {
+                        // Left 'pending': the request may or may not have landed.
+                        saveDraftNow();
+                        throw new Error(`Failed to add Child Parts: ${netErr.message}`);
+                    }
+                    if (!respChild.ok) {
+                        _submitState.childParts.status = 'failed';
+                        saveDraftNow();
+                        throw new Error(`Failed to add Child Parts: ${await respChild.text()}`);
+                    }
+                    _submitState.childParts.status = 'done';
+                    recomputeLockedRows();
+                    saveDraftNow();
+                    if (hot) hot.render();
+                }
+
+                // ── Stage 2: one placeholder PDF per missing drawing ────────
+                // Tracked per part: each call also adds a row to the Drawing
+                // table, so re-sending one already done would duplicate it.
+                if (_submitState.pdfs.status === 'todo' || _submitState.pdfs.status === 'failed') {
+                    _submitState.pdfs.status = 'pending';
+                    saveDraftNow();
+                    const remaining = (_submitState.pdfs.remaining || []).slice();
+                    console.log(`📄 Generating ${remaining.length} PDFs for missing childparts`);
+
+                    const results = await Promise.all(remaining.map(async (matchedPart) => {
+                        try {
+                            const pdfUrl =
+                                `${ENDPOINTS.generateMissingChildpartPdf}` +
+                                `?project=${encodeURIComponent(project)}` +
+                                `&part=${encodeURIComponent(partNumber)}`;
+
+                            const pdfResp = await fetch(pdfUrl, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ matchedPart: matchedPart }),
+                            });
+
+                            if (pdfResp.ok) {
+                                console.log(`✅ Missing childpart PDF generated successfully for: ${matchedPart}`);
+                                return { matchedPart, ok: true };
+                            }
+                            console.warn(`⚠️ PDF generation failed for ${matchedPart}:`, await pdfResp.text());
+                            return { matchedPart, ok: false };
+                        } catch (pdfError) {
+                            console.error(`❌ PDF generation error for ${matchedPart}:`, pdfError);
+                            return { matchedPart, ok: false };
+                        }
+                    }));
+
+                    results.filter(r => r.ok).forEach(r => {
+                        _submitState.pdfs.done.push(r.matchedPart);
+                        _submitState.pdfs.remaining = _submitState.pdfs.remaining.filter(p => p !== r.matchedPart);
+                    });
+                    const failedPdfs = results.filter(r => !r.ok).map(r => r.matchedPart);
+                    _submitState.pdfs.status = failedPdfs.length ? 'failed' : 'done';
+                    saveDraftNow();
+
+                    // Previously these failures were only logged, which silently
+                    // defeated the point of the placeholder.
+                    if (failedPdfs.length) {
+                        throw new Error(`Could not create placeholder drawing for: ${failedPdfs.join(', ')}`);
+                    }
+                }
+
+                // ── Stage 3: BO Parts ──────────────────────────────────────
+                if (_submitState.boParts.status === 'todo' || _submitState.boParts.status === 'failed') {
+                    _submitState.boParts.status = 'pending';
+                    saveDraftNow();
+                    let respBo;
+                    try {
+                        respBo = await fetch(
+                                ENDPOINTS.addBoParts,
+                            {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    rows: stripInternal(boPartsPayload),
+                                    project,
+                                    parentDrawingNumber,
+                                    partNumber,
+                                    rowID: rowID,
+                                    maxItemNumber: maxItemNumber
+                                }),
+                            }
+                        );
+                    } catch (netErr) {
+                        saveDraftNow();
+                        throw new Error(`Failed to add BO Parts: ${netErr.message}`);
+                    }
+                    if (!respBo.ok) {
+                        _submitState.boParts.status = 'failed';
+                        saveDraftNow();
+                        throw new Error(`Failed to add BO Parts: ${await respBo.text()}`);
+                    }
+                    _submitState.boParts.status = 'done';
+                    recomputeLockedRows();
+                    saveDraftNow();
+                    if (hot) hot.render();
+                }
+
+                clearNotificationActions();
+                showNotification(
+                    `Data added successfully!\n- Child Parts: ${childPartsPayload.length}\n- BO Parts: ${boPartsPayload.length}`, 'success'
+                );
+                // Unlock first: hot.clear() will not touch readOnly cells, so
+                // clearing while rows are still locked would leave data behind.
+                _lockedRows = new Set();
+                if (hot) hot.render();
+                // Order matters: clearTableToDefault() fires afterChange, which
+                // schedules a save; clearDraft() then cancels that pending timer.
+                clearTableToDefault();
+                clearDraft();          // whole submission landed — drop the draft
             } catch (error) {
                 console.error("Error sending data:", error);
-                showNotification(`Error adding data: ${error.message}`, 'error');
+                clearNotificationActions();
+                const done = [];
+                if (_submitState?.childParts?.status === 'done') done.push('Child Parts');
+                if (_submitState?.pdfs?.status === 'done') done.push('Missing-drawing PDFs');
+                if (_submitState?.boParts?.status === 'done') done.push('BO Parts');
+                showNotification(
+                    `Error adding data: ${error.message}` +
+                    (done.length ? `\nAlready saved to Glide (will not be resent): ${done.join(', ')}.` : ''),
+                    'error'
+                );
+                saveDraftNow();
             } finally {
                 addDataBtn.disabled = false;
                 addDataBtn.textContent = "Submit";
