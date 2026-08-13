@@ -439,39 +439,105 @@
         }
 
         /* Rows already written to Glide by a partially-completed submit.
-           Read-only because the backend has no update mutation. */
+           Read-only because the backend has no update mutation. Deliberately
+           understated: when only the placeholder drawing is outstanding every
+           row carries this, and heavy dimming would read as "something is
+           broken" when in fact all the data is safely saved. */
         .handsontable td.row-locked {
-            opacity: 0.55;
+            color: #8f8f8f !important;
             cursor: not-allowed;
         }
 
-        /* Action buttons injected into the notification bar */
-        .notif-action {
-            margin-left: 10px;
-            padding: 2px 10px;
-            font-size: 12px;
+        .handsontable td.row-locked:first-child {
+            box-shadow: inset 3px 0 0 #2f6b3a;
+        }
+
+        /* Draft restore / unfinished-submission prompt.
+           Mirrors #instr-modal-* so it reads as part of the same system. */
+        #draft-modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.6);
+            display: none;
+            z-index: 2100;
+        }
+
+        #draft-modal-backdrop.open {
+            display: block;
+        }
+
+        #draft-modal-card {
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            background: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 8px;
+            width: min(90vw, 460px);
+            padding: 20px 22px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+            color: #eaeaea;
+        }
+
+        #draft-modal-card h3 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
             font-weight: 600;
-            color: inherit;
-            background: transparent;
-            border: 1px solid currentColor;
-            border-radius: 4px;
+        }
+
+        #draft-modal-body {
+            font-size: 13px;
+            line-height: 1.55;
+            color: #b9b9b9;
+        }
+
+        #draft-modal-body .draft-stage-done { color: #4ade80; }
+        #draft-modal-body .draft-stage-todo { color: #f0b429; }
+
+        #draft-modal-actions {
+            margin-top: 18px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        #draft-modal-actions button {
+            padding: 7px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            border-radius: 5px;
             cursor: pointer;
-            opacity: 0.9;
+            border: 1px solid #555;
+            background: transparent;
+            color: #ddd;
         }
 
-        .notif-action:hover {
-            opacity: 1;
+        #draft-modal-actions button.primary {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: #fff;
         }
 
+        #draft-modal-actions button:hover { opacity: 0.88; }
+
+        /* Autosave state pill. Deliberately outside the notification bar, which
+           is transient real estate. Only rendered when persistence is not
+           reliable — see AUTOSAVE_BADGE_WHEN. */
         #autosave-badge {
             margin-right: 10px;
-            padding: 2px 8px;
-            font-size: 11px;
-            color: #f0b429;
-            border: 1px solid #f0b429;
-            border-radius: 4px;
+            padding: 1px 7px;
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            color: #8a8a8a;
+            border: 1px solid #3a3a3a;
+            border-radius: 9px;
             white-space: nowrap;
+            cursor: default;
         }
+
+        #autosave-badge:hover { color: #c9a227; border-color: #6b5410; }
 
         .handsontable td.type-missing-childpart {
             color:#fc5f67 !important;
@@ -1681,23 +1747,66 @@ function hasUnresolvedSubmit() {
     });
 }
 
-// showNotification() overwrites textContent, so action buttons live as
-// siblings inside the notification area rather than inside the text node.
+// The notification bar is transient and single-purpose: information only.
+// Anything actionable belongs either on the Submit button or in the draft
+// modal, so it can't be silently replaced by the next message.
 function clearNotificationActions() {
     document.querySelectorAll('#notification-area .notif-action').forEach(b => b.remove());
 }
 
-function addNotificationAction(label, onClick) {
-    const area = document.getElementById('notification-area');
-    if (!area) return null;
-    const btn = document.createElement('button');
-    btn.className = 'notif-action';
-    btn.type = 'button';
-    btn.textContent = label;
-    btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
-    const closeBtn = document.getElementById('notification-close');
-    if (closeBtn) area.insertBefore(btn, closeBtn); else area.appendChild(btn);
-    return btn;
+// ── Draft modal ────────────────────────────────────────────────────────
+// actions: [{ label, primary?, onClick }]
+function openDraftModal(title, bodyHtml, actions) {
+    const backdrop = document.getElementById('draft-modal-backdrop');
+    if (!backdrop) return;
+    document.getElementById('draft-modal-title').textContent = title;
+    document.getElementById('draft-modal-body').innerHTML = bodyHtml;
+
+    const box = document.getElementById('draft-modal-actions');
+    box.innerHTML = '';
+    actions.forEach(a => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = a.label;
+        if (a.primary) btn.className = 'primary';
+        btn.addEventListener('click', () => { closeDraftModal(); a.onClick(); });
+        box.appendChild(btn);
+    });
+
+    backdrop.classList.add('open');
+    backdrop.setAttribute('aria-hidden', 'false');
+    const first = box.querySelector('button.primary') || box.querySelector('button');
+    if (first) first.focus();
+}
+
+function closeDraftModal() {
+    const backdrop = document.getElementById('draft-modal-backdrop');
+    if (!backdrop) return;
+    backdrop.classList.remove('open');
+    backdrop.setAttribute('aria-hidden', 'true');
+}
+
+function escapeHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// The Submit button is the single action surface. Its label states what a
+// press will actually do, so there is never a second competing button.
+function refreshSubmitButtonState() {
+    const btn = document.getElementById('submit-btn');
+    if (!btn) return;
+    if (!hasUnresolvedSubmit()) { btn.textContent = 'Submit'; return; }
+    // Data already saved and only the placeholder drawing outstanding.
+    btn.textContent = onlyPdfsOutstanding() ? 'Create drawing' : 'Send remaining';
+}
+
+function onlyPdfsOutstanding() {
+    if (!_submitState) return false;
+    const unresolved = ['childParts', 'pdfs', 'boParts']
+        .filter(k => ['pending', 'failed', 'todo'].includes(_submitState[k]?.status));
+    return unresolved.length === 1 && unresolved[0] === 'pdfs';
 }
 
 // === One-shot notification gate (pre-submit live notifications) ===
@@ -2170,6 +2279,7 @@ if (!_restoredThisLoad) showDefaultInstructions();
             _draftReady = true;
 
             _restoredThisLoad = !!restored;
+            refreshSubmitButtonState();
             if (restored) {
                 replayEditedCellMeta();
                 announceRestore(restored);
@@ -2200,30 +2310,48 @@ if (!_restoredThisLoad) showDefaultInstructions();
             hot.render();
         }
 
+        // Asked rather than auto-applied: an explicit choice removes the
+        // "is this my data or leftovers?" confusion on every reload.
         function announceRestore(draft) {
             const age = describeAge(Date.now() - draft.savedAt);
+            const rows = (draft.rows || []).length;
             if (hasUnresolvedSubmit()) { announceUnresolvedSubmit(); return; }
-            clearNotificationActions();
-            showNotification(`Restored your unsaved work from ${age}.`, 'success', 0);
-            addNotificationAction('Start fresh', () => {
-                clearDraft();
-                clearNotificationActions();
-                _draftReady = false;
-                initializeHandsontable();
-                showDefaultInstructions();
-            });
+            openDraftModal(
+                'Unsaved work found',
+                `You have <strong>${rows} row${rows === 1 ? '' : 's'}</strong> of unsaved work from ${escapeHtml(age)}.<br><br>` +
+                `Restore it, or start with an empty table?`,
+                [
+                    { label: 'Start fresh', onClick: () => {
+                        clearDraft();
+                        _draftReady = false;
+                        initializeHandsontable();
+                        showDefaultInstructions();
+                    } },
+                    { label: 'Restore', primary: true, onClick: () => {
+                        // Already loaded into the table underneath the modal.
+                        showNotification(`Restored ${rows} row${rows === 1 ? '' : 's'} from ${age}.`, 'success');
+                    } }
+                ]
+            );
         }
+
+        // Show the pill only when persistence is genuinely unreliable.
+        // Flip this to `true` to show it always, or `false` to disable it.
+        const AUTOSAVE_BADGE_WHEN = !DraftStore.durable();
 
         function markAutosaveUnavailable() {
             console.warn(`[draft] non-durable storage in use: ${DraftStore.kind()}`);
+            if (!AUTOSAVE_BADGE_WHEN) return;
             const area = document.getElementById('table-action-buttons');
             if (!area || document.getElementById('autosave-badge')) return;
             const badge = document.createElement('span');
             badge.id = 'autosave-badge';
             badge.textContent = DraftStore.kind() === 'memory'
-                ? 'Autosave unavailable'
-                : 'Autosave: this session only';
-            badge.title = 'This browser restricts storage for embedded pages, so your work may not survive closing the app.';
+                ? 'Autosave off'
+                : 'Autosave: session only';
+            badge.title = DraftStore.kind() === 'memory'
+                ? 'This browser blocks storage for embedded pages, so work cannot be saved across reloads.'
+                : 'This browser restricts storage for embedded pages. Work survives a reload, but not closing the app.';
             area.insertBefore(badge, area.firstChild);
         }
 
@@ -3456,10 +3584,31 @@ if (!_restoredThisLoad) showDefaultInstructions();
         }
 
         // Notifications
-        function showNotification(message, type = 'success', duration = 5000) {
+        // Global ranking across ALL notification callers. refreshNotifications()
+        // keeps its own row-level priority (missing drawing > low similarity);
+        // this only stops a lower-rank message from wiping a higher-rank one.
+        // Lower number = more important.
+        const NOTIF_RANK = { error: 1, warning: 2, success: 3, instructions: 4 };
+        const NOTIF_HOLD_MS = 4000;   // how long a message is protected for
+        let _currentNotifRank = 99;
+        let _currentNotifAt = 0;
+
+        function showNotification(message, type = 'success', duration = 5000, opts = {}) {
             const area = document.getElementById('notification-area');
             const icon = document.getElementById('notification-icon');
             const text = document.getElementById('notification-text');
+
+            const rank = NOTIF_RANK[type] ?? 3;
+            const visible = area && !area.classList.contains('notification-hidden');
+            // A lower-priority message can't replace a higher-priority one while
+            // it's still fresh. Previously "X is already used…" was wiped a tick
+            // later by the default instructions, because the no-issue branch of
+            // refreshNotifications() only protected success messages.
+            // The hold expires so a resolved error doesn't linger forever.
+            if (!opts.force && visible && rank > _currentNotifRank
+                && (Date.now() - _currentNotifAt) < NOTIF_HOLD_MS) return;
+            _currentNotifRank = rank;
+            _currentNotifAt = Date.now();
 
             // Drop any action buttons belonging to the previous message
             clearNotificationActions();
@@ -3491,6 +3640,8 @@ if (!_restoredThisLoad) showDefaultInstructions();
 
         function hideNotification() {
             clearNotificationActions();
+            _currentNotifRank = 99;   // release the priority hold
+            _currentNotifAt = 0;
             document.getElementById('notification-area').className = 'notification-hidden';
         }
 // --- Default instructions text (single source of truth) ---
@@ -3931,44 +4082,113 @@ document.addEventListener('DOMContentLoaded', () => {
             return diverged;
         }
 
+        const STAGE_LABELS = { childParts: 'Child Parts', pdfs: 'Placeholder drawings', boParts: 'BO Parts' };
+
+        function stageRowCount(key) {
+            const st = _submitState?.[key];
+            if (!st) return 0;
+            if (key === 'pdfs') return (st.remaining || []).length + (st.done || []).length;
+            return (st.payload || []).length;
+        }
+
+        // Informational only, with a single acknowledge. The user is never
+        // pushed straight into re-sending — they get to review the table and
+        // see what already landed before pressing anything.
+        // A stage that never reached Glide must be rebuilt from the live table on
+        // resume — otherwise a user who fixes the row that caused the failure
+        // would silently re-send the original bad data, and rows added since
+        // would be dropped. Stages already 'done' keep their frozen payload:
+        // that is the record of what Glide actually holds.
+        function rebuildOutstandingStages() {
+            if (!_submitState) return;
+            const fresh = buildSubmitState();
+
+            // Item numbers already assigned in this submission must never be
+            // reused, or a newly inserted row could collide with one already
+            // written to Glide.
+            const used = new Set();
+            ['childParts', 'boParts'].forEach(k => {
+                (_submitState[k]?.payload || []).forEach(r => used.add(r.itemNumber));
+            });
+            let nextItem = Math.max(_submitState.maxItemNumber || 0, _submitState.itemBase || 0);
+
+            // Rows are matched to the previous attempt by physical row index.
+            // Deleting a row before resuming breaks that match, and the shifted
+            // rows are then treated as new — they get fresh item numbers rather
+            // than silently inheriting someone else's.
+            const remap = (rows, prevRows) => {
+                const byRow = new Map((prevRows || []).map(r => [r._pRow, r]));
+                return rows.map(r => {
+                    const prev = byRow.get(r._pRow);
+                    if (prev) return { ...r, itemNumber: prev.itemNumber };
+                    do { nextItem += 1; } while (used.has(nextItem));
+                    used.add(nextItem);
+                    return { ...r, itemNumber: nextItem };
+                });
+            };
+
+            ['childParts', 'boParts'].forEach(k => {
+                const st = _submitState[k];
+                if (!st || st.status === 'done') return;          // frozen
+                st.payload = remap(fresh[k].payload || [], st.payload);
+                if (!st.payload.length) st.status = 'skipped';
+                else if (st.status === 'skipped') st.status = 'todo';   // rows added since
+            });
+
+            const pdfs = _submitState.pdfs;
+            if (pdfs && pdfs.status !== 'done') {
+                const alreadyDone = new Set(pdfs.done || []);
+                pdfs.remaining = (fresh.pdfs.remaining || []).filter(p => !alreadyDone.has(p));
+                if (!pdfs.remaining.length) pdfs.status = 'skipped';
+                else if (pdfs.status === 'skipped') pdfs.status = 'todo';
+            }
+
+            let mx = _submitState.itemBase || 0;
+            ['childParts', 'boParts'].forEach(k => {
+                (_submitState[k]?.payload || []).forEach(r => { mx = Math.max(mx, r.itemNumber); });
+            });
+            _submitState.maxItemNumber = mx;
+        }
+
         function announceUnresolvedSubmit() {
-            const done = [];
-            const outstanding = [];
-            if (_submitState.childParts?.status === 'done') done.push('Child Parts');
-            if (_submitState.pdfs?.status === 'done') done.push('Missing-drawing PDFs');
-            if (_submitState.boParts?.status === 'done') done.push('BO Parts');
+            const done = [], outstanding = [];
             ['childParts', 'pdfs', 'boParts'].forEach(k => {
                 const st = _submitState[k];
-                if (!st || st.status === 'done' || st.status === 'skipped') return;
-                outstanding.push({ childParts: 'Child Parts', pdfs: 'Missing-drawing PDFs', boParts: 'BO Parts' }[k]);
+                if (!st || st.status === 'skipped') return;
+                (st.status === 'done' ? done : outstanding).push(k);
             });
 
             // Weak signal only: both endpoints bump the same counter, so an
             // advance proves at least one stage landed, never which one.
             const pending = ['childParts', 'pdfs', 'boParts'].filter(k => _submitState[k]?.status === 'pending');
-            let hint = '';
-            if (pending.length && currentItemParam() >= (_submitState.maxItemNumber || 0)) {
-                hint = ' Some data may already have been saved — check Glide before resending.';
-            }
+            const uncertain = pending.length && currentItemParam() >= (_submitState.maxItemNumber || 0);
 
-            clearNotificationActions();
-            showNotification(
-                `Previous submission did not finish.${done.length ? ` Already saved: ${done.join(', ')}.` : ''}` +
-                `${outstanding.length ? ` Not yet saved: ${outstanding.join(', ')}.` : ''}${hint}`,
-                'warning', 0
-            );
-            addNotificationAction('Send remaining', () => {
-                clearNotificationActions();
-                sendDataToBackend({ resume: true });
-            });
-            addNotificationAction('Discard', () => {
-                // Stops trying to finish this submission. Does NOT undo anything
-                // already written to Glide — nothing here can.
-                clearNotificationActions();
-                clearDraft();
-                if (hot) hot.render();
-                showNotification('Stopped. Rows already saved to Glide remain there.', 'success');
-            });
+            const line = (k, cls) => {
+                const n = k === 'pdfs' ? (_submitState.pdfs.remaining || []).length : stageRowCount(k);
+                const label = STAGE_LABELS[k];
+                return `<div class="${cls}">• ${escapeHtml(label)}${n ? ` (${n})` : ''}</div>`;
+            };
+
+            let body = 'Your last submission did not finish.<br><br>';
+            if (done.length) body += `<strong>Already saved to Glide:</strong>${done.map(k => line(k, 'draft-stage-done')).join('')}<br>`;
+            if (outstanding.length) body += `<strong>Not yet saved:</strong>${outstanding.map(k => line(k, 'draft-stage-todo')).join('')}<br>`;
+            body += uncertain
+                ? `One request may have reached Glide without replying. Check Glide before sending again.<br><br>`
+                : '';
+            body += onlyPdfsOutstanding()
+                ? `All BOM data is saved. Only the placeholder drawing is missing — review, then press <strong>Create drawing</strong>.`
+                : `Review the table, then press <strong>Send remaining</strong>. Rows already saved are locked and will not be sent twice.`;
+
+            openDraftModal('Unfinished submission', body, [
+                { label: 'Got it', primary: true, onClick: () => {
+                    showNotification(
+                        onlyPdfsOutstanding()
+                            ? 'All data saved. Placeholder drawing still to create.'
+                            : `Already saved: ${done.map(k => STAGE_LABELS[k]).join(', ') || 'nothing'}. Press Send remaining when ready.`,
+                        'warning', 0
+                    );
+                } }
+            ]);
         }
 
         async function sendDataToBackend(opts = {}) {
@@ -4014,6 +4234,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             'warning', 0
                         );
                     }
+                    // Pick up corrections and newly added rows for anything that
+                    // has not already reached Glide.
+                    rebuildOutstandingStages();
+                    saveDraftNow();
                 } else {
                     _submitState = buildSubmitState();
                     recomputeLockedRows();
@@ -4191,7 +4415,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 saveDraftNow();
             } finally {
                 addDataBtn.disabled = false;
-                addDataBtn.textContent = "Submit";
+                // Label states what the NEXT press will do, so there is never a
+                // second competing action anywhere in the UI.
+                refreshSubmitButtonState();
             }
         }
 
@@ -4251,6 +4477,16 @@ document.addEventListener('DOMContentLoaded', () => {
   <div id="instr-modal-card" role="dialog" aria-modal="true" aria-labelledby="instr-modal-title">
     <button id="instr-modal-close" aria-label="Close">×</button>
     <div id="instr-modal-body"></div>
+  </div>
+</div>
+
+<!-- Draft restore / unfinished-submission prompt. Its own element rather than
+     reusing the instructions modal, which carries hover and auto-close timers. -->
+<div id="draft-modal-backdrop" aria-hidden="true">
+  <div id="draft-modal-card" role="dialog" aria-modal="true" aria-labelledby="draft-modal-title">
+    <h3 id="draft-modal-title"></h3>
+    <div id="draft-modal-body"></div>
+    <div id="draft-modal-actions"></div>
   </div>
 </div>
 
