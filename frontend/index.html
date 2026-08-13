@@ -2438,8 +2438,15 @@ if (!_restoredThisLoad) showDefaultInstructions();
                             : undefined,
 
                     strict: false,
+                    // NOTE: dead line. `allowInvalid` is set again further down in
+                    // this same object literal, and in JS the later key wins — so
+                    // `allowInvalid: true` is what actually applies. Editing this
+                    // one changes nothing. It also would not matter if it did: the
+                    // validator below always calls callback(true) and flags rows
+                    // via _missingDrawing instead, so nothing is ever reported
+                    // invalid for allowInvalid to act on. Left in place on purpose.
                     allowInvalid: false,
-                    
+
                     // ADD THIS VALIDATOR FUNCTION:
                     validator: isMatched ? function(value, callback) {
                       // ✅ row-accurate: use validator context instead of selection
