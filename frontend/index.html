@@ -1822,6 +1822,12 @@ function requestNotificationRefreshOnce() {
 }
 function resetNotificationGate() {
   _notifGate.active = false;
+  // A fresh user edit is the signal that the previous error/warning has been
+  // acted on. Releasing the hold here (and only here) is what lets a corrected
+  // issue clear, while an uncorrected one is simply re-detected by the scan.
+  // Note the ordering in afterChange: the gate resets BEFORE any validator
+  // runs, so a new error raised by this same edit becomes sticky again.
+  _notifSticky = false;
 }
 
 // === Helper: track used childparts in rows marked as "Child Part" ===
@@ -3589,9 +3595,8 @@ if (!_restoredThisLoad) showDefaultInstructions();
         // this only stops a lower-rank message from wiping a higher-rank one.
         // Lower number = more important.
         const NOTIF_RANK = { error: 1, warning: 2, success: 3, instructions: 4 };
-        const NOTIF_HOLD_MS = 4000;   // how long a message is protected for
         let _currentNotifRank = 99;
-        let _currentNotifAt = 0;
+        let _notifSticky = false;   // an unresolved error/warning is on screen
 
         function showNotification(message, type = 'success', duration = 5000, opts = {}) {
             const area = document.getElementById('notification-area');
@@ -3600,15 +3605,17 @@ if (!_restoredThisLoad) showDefaultInstructions();
 
             const rank = NOTIF_RANK[type] ?? 3;
             const visible = area && !area.classList.contains('notification-hidden');
-            // A lower-priority message can't replace a higher-priority one while
-            // it's still fresh. Previously "X is already used…" was wiped a tick
-            // later by the default instructions, because the no-issue branch of
-            // refreshNotifications() only protected success messages.
-            // The hold expires so a resolved error doesn't linger forever.
-            if (!opts.force && visible && rank > _currentNotifRank
-                && (Date.now() - _currentNotifAt) < NOTIF_HOLD_MS) return;
+            // Errors and warnings hold the bar until something RESOLVES them —
+            // never on a timer. Resolution is exactly one of:
+            //   1. an equal-or-higher priority message arrives
+            //   2. the user dismisses it (×)
+            //   3. the user makes another edit, which calls resetNotificationGate()
+            // State-derived messages (Part Number Not Found, low similarity) are
+            // re-detected by refreshNotifications() on every scan, so they simply
+            // reappear until the underlying row is actually corrected.
+            if (!opts.force && visible && _notifSticky && rank > _currentNotifRank) return;
             _currentNotifRank = rank;
-            _currentNotifAt = Date.now();
+            _notifSticky = (rank <= NOTIF_RANK.warning);
 
             // Drop any action buttons belonging to the previous message
             clearNotificationActions();
@@ -3640,8 +3647,8 @@ if (!_restoredThisLoad) showDefaultInstructions();
 
         function hideNotification() {
             clearNotificationActions();
-            _currentNotifRank = 99;   // release the priority hold
-            _currentNotifAt = 0;
+            _currentNotifRank = 99;   // explicit dismissal resolves the message
+            _notifSticky = false;
             document.getElementById('notification-area').className = 'notification-hidden';
         }
 // --- Default instructions text (single source of truth) ---
