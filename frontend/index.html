@@ -513,10 +513,12 @@
             color: #ddd;
         }
 
+        /* Matches #submit-btn so the primary action looks the same everywhere */
         #draft-modal-actions button.primary {
-            background: #2563eb;
-            border-color: #2563eb;
+            background: #D99E01;
+            border-color: #D99E01;
             color: #fff;
+            font-weight: 700;
         }
 
         #draft-modal-actions button:hover { opacity: 0.88; }
@@ -1683,16 +1685,46 @@ function normalizeRow(rawRow) {
     return base;
 }
 
+// Fingerprint of the content only — never the timestamp. Used both to skip
+// no-op writes and to decide whether a draft has changed since the user last
+// answered the restore prompt.
+function draftFingerprint(rows, submitState) {
+    return JSON.stringify({ rows, submitState: submitState || null });
+}
+
+let _lastWrittenFingerprint = null;
+let _acknowledgedFingerprint = null;   // content the user has already decided about
+
 function saveDraftNow() {
     if (!_draftReady) return;
     clearTimeout(_saveTimer); _saveTimer = null;
+
+    const rows = rowsForSave();
+    const fingerprint = draftFingerprint(rows, _submitState);
+
+    // An untouched session must leave nothing behind, or the next visit would
+    // be prompted to restore an empty table.
+    if (!rows.length && !_submitState) {
+        if (_lastWrittenFingerprint !== null) DraftStore.remove(draftKey());
+        _lastWrittenFingerprint = null;
+        return;
+    }
+
+    // Nothing actually changed. Skipping the write is what keeps `savedAt`
+    // meaning "last modified" — pagehide/beforeunload/visibilitychange all call
+    // this on every reload, so writing unconditionally reset the age to "now"
+    // each time and the draft could never grow old.
+    if (fingerprint === _lastWrittenFingerprint) return;
+
     DraftStore.set(draftKey(), {
         v: 1,
         savedAt: Date.now(),
         item: currentItemParam(),
-        rows: rowsForSave(),
-        submitState: _submitState
+        rows,
+        submitState: _submitState,
+        acknowledged: _acknowledgedFingerprint
     });
+    _lastWrittenFingerprint = fingerprint;
 }
 
 function scheduleDraftSave() {
@@ -1712,6 +1744,8 @@ function clearDraft() {
     clearTimeout(_saveTimer); _saveTimer = null;
     _submitState = null;
     _lockedRows = new Set();
+    _lastWrittenFingerprint = null;
+    _acknowledgedFingerprint = null;
     DraftStore.remove(draftKey());
 }
 
@@ -2268,6 +2302,10 @@ if (!_restoredThisLoad) showDefaultInstructions();
                     _submitState = draft.submitState || null;
                     recomputeLockedRows();
                     restored = draft;
+                    // Seed both fingerprints from what we just loaded, so simply
+                    // opening the page is never mistaken for a change.
+                    _lastWrittenFingerprint = draftFingerprint(draft.rows, draft.submitState);
+                    _acknowledgedFingerprint = draft.acknowledged || null;
                     // Hold the gate closed so renderer-driven warning refreshes
                     // don't stomp the restore banner before it's even shown.
                     // The first user edit calls resetNotificationGate() as usual.
@@ -2316,12 +2354,23 @@ if (!_restoredThisLoad) showDefaultInstructions();
             hot.render();
         }
 
-        // Asked rather than auto-applied: an explicit choice removes the
-        // "is this my data or leftovers?" confusion on every reload.
+        // Ask once per version of the draft. Once the user has chosen Restore for
+        // a given set of rows, reloading does not ask again — the embed reloads
+        // itself often (Safari especially), and re-asking each time is noise. If
+        // the content has changed since that choice there is a new decision to
+        // make, so the prompt returns.
         function announceRestore(draft) {
             const age = describeAge(Date.now() - draft.savedAt);
             const rows = (draft.rows || []).length;
             if (hasUnresolvedSubmit()) { announceUnresolvedSubmit(); return; }
+
+            const current = draftFingerprint(draft.rows, draft.submitState);
+            if (draft.acknowledged && draft.acknowledged === current) {
+                _acknowledgedFingerprint = current;
+                showNotification(`Restored ${rows} row${rows === 1 ? '' : 's'} from ${age}.`, 'success');
+                return;
+            }
+
             openDraftModal(
                 'Unsaved work found',
                 `You have <strong>${rows} row${rows === 1 ? '' : 's'}</strong> of unsaved work from ${escapeHtml(age)}.<br><br>` +
@@ -2335,18 +2384,30 @@ if (!_restoredThisLoad) showDefaultInstructions();
                     } },
                     { label: 'Restore', primary: true, onClick: () => {
                         // Already loaded into the table underneath the modal.
+                        // Record the decision against this exact content.
+                        _acknowledgedFingerprint = current;
+                        _lastWrittenFingerprint = null;   // force one write to persist it
+                        saveDraftNow();
                         showNotification(`Restored ${rows} row${rows === 1 ? '' : 's'} from ${age}.`, 'success');
                     } }
                 ]
             );
         }
 
-        // Show the pill only when persistence is genuinely unreliable.
-        // Flip this to `true` to show it always, or `false` to disable it.
-        const AUTOSAVE_BADGE_WHEN = !DraftStore.durable();
+        // Safari writes to localStorage happily inside a cross-origin iframe, so
+        // the write probe passes — but the data is ephemeral and cleared when the
+        // browser closes. Confirmed empirically: reload, in-app navigation and
+        // hard refresh all survived; closing the browser did not.
+        //
+        // There is no API that reports "will this storage survive the session",
+        // so this is a user-agent heuristic and will not be right for everyone
+        // (e.g. Safari with cross-site tracking prevention disabled). Chromium
+        // browsers exclude themselves via the CriOS/Chrome tokens.
+        const IS_WEBKIT_SAFARI = /^((?!chrome|chromium|android|crios|fxios|edg).)*safari/i.test(navigator.userAgent);
+        const AUTOSAVE_BADGE_WHEN = !DraftStore.durable() || IS_WEBKIT_SAFARI;
 
         function markAutosaveUnavailable() {
-            console.warn(`[draft] non-durable storage in use: ${DraftStore.kind()}`);
+            if (!DraftStore.durable()) console.warn(`[draft] non-durable storage: ${DraftStore.kind()}`);
             if (!AUTOSAVE_BADGE_WHEN) return;
             const area = document.getElementById('table-action-buttons');
             if (!area || document.getElementById('autosave-badge')) return;
@@ -2357,7 +2418,7 @@ if (!_restoredThisLoad) showDefaultInstructions();
                 : 'Autosave: session only';
             badge.title = DraftStore.kind() === 'memory'
                 ? 'This browser blocks storage for embedded pages, so work cannot be saved across reloads.'
-                : 'This browser restricts storage for embedded pages. Work survives a reload, but not closing the app.';
+                : 'Work is kept across reloads, but may not survive closing the browser. Depends on browser settings.';
             area.insertBefore(badge, area.firstChild);
         }
 
@@ -2630,6 +2691,14 @@ if (!_restoredThisLoad) showDefaultInstructions();
                                 }
                             }
                         }
+
+                        // Row-level styling, applied after whichever base renderer
+                        // ran above (they reset td.className, so these must come
+                        // last). toggle() rather than add() so the class clears
+                        // when the row stops being BO or stops being locked.
+                        const rowState = spreadsheetData[row];
+                        td.classList.toggle('bo-row', !!rowState && rowState.Type === "BO");
+                        td.classList.toggle('row-locked', _lockedRows.has(row));
                     },
                 };
             });
@@ -2665,19 +2734,18 @@ if (!_restoredThisLoad) showDefaultInstructions();
                 // --- Add cells function to apply bo-row class to all cells in BO rows ---
                 cells: function(row, col) {
                   const cellProperties = {};
-                  const rowData = spreadsheetData[row];
-                  const classes = [];
-                  if (rowData && rowData.Type === "BO") {
-                    classes.push('bo-row');
-                  }
-                  // Already written to Glide by a partially-completed submit.
-                  // Lock rather than let an edit be silently dropped — the
-                  // backend only ever adds rows, it cannot update them.
-                  if (_lockedRows.has(row)) {
-                    cellProperties.readOnly = true;
-                    classes.push('row-locked');
-                  }
-                  if (classes.length) cellProperties.className = classes.join(' ');
+                  // Assign unconditionally. Handsontable's cell meta persists
+                  // between renders, so a property only set on the "true" branch
+                  // is never cleared when the condition stops holding — that is
+                  // why a row stayed italic after switching BO -> Child Part.
+                  //
+                  // Locked rows are read-only because the backend only ever adds
+                  // rows and cannot update them, so an edit here could not reach
+                  // Glide. The matching *visual* classes are applied in the
+                  // renderer instead of via className here: afterChange manages
+                  // className through setCellMeta (edited-cell, user-edited-ocr),
+                  // and two writers on one property clobber each other.
+                  cellProperties.readOnly = _lockedRows.has(row);
                   return cellProperties;
                 },
 
@@ -3878,10 +3946,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // PRIORITY 1: Missing Drawing Error (OCR mismatch) - RED ICON + NOTIFICATION
                 if (rowData["_missingDrawing"]) {
-                    highestPriorityNotification = { 
-                        message: "Part Number Not Found", 
+                    // Same wording the validators use for this condition. Both
+                    // describe the same row, and the validator's own call to
+                    // requestNotificationRefreshOnce() (plus the renderer's, when
+                    // it paints the red !) means this scan runs immediately after
+                    // one is shown. Identical text makes that handover invisible
+                    // instead of replacing a specific message with a vague one.
+                    const badPart = (rowData["Matched Childpart"] || "").toString().trim();
+                    highestPriorityNotification = {
+                        message: badPart
+                            ? `"${badPart}" is not a valid child part.`
+                            : "Part Number Not Found",
                         type: "error",
-                        priority: 1 
+                        priority: 1
                     };
                     break; // Highest priority, stop checking
                 }

@@ -18,6 +18,7 @@ done
 run "suite 3: payload build"   "$D/stubs.js" "$D/s3-submitenv.js" "$D/submitcore.js" "$D/s3-tests.js"
 run "suite 4: staged submit"   "$D/stubs.js" "$D/s4-e2eenv.js" "$D/draftcore.js" "$D/s4-glue.js" "$D/submitcore.js" "$D/sendfn.js" "$D/s4-tests.js"
 run "suite 5: notif priority"  "$D/stubs.js" "$D/s5-notifenv.js" "$D/notif.js" "$D/s5-tests.js"
+run "suite 6: draft lifecycle" "$D/stubs.js" "$D/s6-draftlifecycle.js" "$D/draftcore.js" "$D/s6-tests.js"
 rm -f "$D/.run.js"
 echo; [ $rc -eq 0 ] && echo "ALL SUITES PASSED" || echo "SOME SUITES FAILED"
 exit $rc
