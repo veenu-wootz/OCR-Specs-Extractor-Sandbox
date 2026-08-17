@@ -20,7 +20,8 @@ ours.
 
 1. Open your Glide app and go to the screen containing the Web Embed.
 2. Open DevTools — `Cmd+Option+I` (Mac) or `F12` (Windows).
-3. Go to the **Console** tab.
+3. Go to the **Network** tab and tick **Preserve log**, so the record survives
+   Glide reloading the embed. Then go to the **Console** tab.
 4. At the top of the Console there is a dropdown that says **`top`**. Click it and
    choose the entry showing the `veenu-wootz.github.io` URL.
 
@@ -59,22 +60,38 @@ window.fetch = (url, opts) => {
 console.log('[test] failure injection active for', window.__breakUrl);
 ```
 
-**To stop breaking it:**
+**To stop breaking it** — use this exact snippet, which is safe to run at any time:
 
 ```js
-window.fetch = window.__origFetch;
-console.log('[test] back to normal');
+if (typeof window.__origFetch === 'function') {
+  window.fetch = window.__origFetch;
+  console.log('[test] restored');
+} else {
+  console.log('[test] nothing to restore — fetch is already the real one');
+}
 ```
 
-Two things to know:
+> ⚠️ **Never run a bare `window.fetch = window.__origFetch;`.**
+> If the page has reloaded since you injected the failure, `__origFetch` is
+> `undefined`, and that line assigns `undefined` to `window.fetch` — **deleting the
+> browser's fetch entirely.** Every request then fails with *"fetch is not a
+> function"*, including ones you never meant to break. The tell is the console
+> echoing `undefined` after the assignment. If it happens, just reload the page.
 
-- **Reloading the page undoes it.** `window.fetch` is restored automatically, so
-  after any reload you must paste the snippet again.
+Three things to know:
+
+- **Reloading the page undoes the injection by itself.** A reload gives a fresh
+  `window`, so `fetch` is already normal and `__origFetch` is gone. After any
+  reload you must paste the injection snippet again — and you do *not* need the
+  undo.
 - **A 500 is different from a blocked request.** This snippet returns a real HTTP
-  error, so the stage is recorded as `failed` and the app offers *Send remaining*.
-  If you instead block the request in the Network panel it *throws*, which the app
-  treats as "sent, outcome unknown" and leaves the stage `pending` — a different,
-  also-valid scenario, with a more cautious message.
+  error, so the stage is recorded as `failed`. Blocking the request in the Network
+  panel makes fetch *throw*, which the app records as `pending` — "sent, outcome
+  unknown" — and the modal warns you to check Glide before resending. Both paths
+  retry correctly; the wording differs because the risk does.
+- **Tick "Preserve log"** at the top of the Network panel before you start.
+  Without it, the log is wiped every time Glide reloads the embed, and it will
+  look as though no requests were made.
 
 ---
 

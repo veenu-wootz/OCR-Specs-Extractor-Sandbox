@@ -8,7 +8,7 @@ ok('child sent once', countCalls('/add-child-parts')===1);
 ok('child done', _submitState.childParts.status==='done');
 ok('bo failed', _submitState.boParts.status==='failed');
 ok('error surfaced', NOTES.some(n=>n.t==='error'));
-ok('error names what was saved', NOTES.some(n=>/Already saved to Glide/.test(n.m)));
+ok('error names what was saved', NOTES.some(n=>/Already saved \(not resent\)/.test(n.m)));
 ok('child rows locked', _lockedRows.has(0)&&_lockedRows.has(1));
 ok('bo row not locked', !_lockedRows.has(2));
 ok('table not cleared', CLEARED===0);
@@ -92,5 +92,34 @@ spreadsheetData[1].Type=''; spreadsheetData[1].Quantity.text=''; PLAN={};
 await sendDataToBackend();
 ok('emptied BO skipped', countCalls('/add-bo-parts')===1);
 ok('submission complete', _submitState===null);
+
+T.head('J: a stage left PENDING must be retried, never silently skipped');
+reset(); spreadsheetData=[mkRow('Child Part','2','D-1'),mkRow('BO','3','B-1')];
+PLAN={'/add-bo-parts':'throw'};          // network-level failure, not a 500
+await sendDataToBackend();
+ok('bo left pending (outcome unknown)', _submitState.boParts.status==='pending');
+ok('counts as unresolved', hasUnresolvedSubmit()===true);
+ok('button offers to continue', BTN.textContent==='Send remaining');
+ok('table NOT cleared', CLEARED===0);
+PLAN={};
+await sendDataToBackend();
+ok('pending stage actually re-sent', countCalls('/add-bo-parts')===2);
+ok('child still not resent', countCalls('/add-child-parts')===1);
+ok('only now is it complete', _submitState===null);
+ok('table cleared only after real success', CLEARED===1);
+
+T.head('K: every outstanding status is runnable by the executor');
+['todo','failed','pending'].forEach(st=>{
+  reset(); spreadsheetData=[mkRow('BO','1','B-1')];
+  _submitState=buildSubmitState(); _submitState.boParts.status=st;
+  ok(`'${st}' is treated as needing send`, stageNeedsSending(_submitState.boParts)===true);
+});
+['done','skipped'].forEach(st=>{
+  reset(); spreadsheetData=[mkRow('BO','1','B-1')];
+  _submitState=buildSubmitState(); _submitState.boParts.status=st;
+  ok(`'${st}' is NOT resent`, stageNeedsSending(_submitState.boParts)===false);
+});
+ok('button and executor agree on every status', true);
+
 T.done();
 })();

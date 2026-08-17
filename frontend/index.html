@@ -1788,12 +1788,23 @@ function recomputeLockedRows() {
     });
 }
 
+// Stage statuses: 'todo' (built, not attempted) | 'pending' (request sent,
+// outcome unknown) | 'failed' (server rejected it) | 'done' | 'skipped'.
+//
+// ONE definition of "still needs sending", used by the executor, the button
+// label and the unresolved check alike. They previously disagreed: the button
+// treated 'pending' as unresolved while the executor refused to send it, so a
+// stage left pending by a dropped connection was skipped on retry and the
+// submission was then declared complete — silently losing those rows.
+const STAGE_OUTSTANDING = ['todo', 'failed', 'pending'];
+
+function stageNeedsSending(stage) {
+    return !!stage && STAGE_OUTSTANDING.includes(stage.status);
+}
+
 function hasUnresolvedSubmit() {
     if (!_submitState) return false;
-    return ['childParts', 'pdfs', 'boParts'].some(k => {
-        const st = _submitState[k];
-        return st && (st.status === 'pending' || st.status === 'failed');
-    });
+    return ['childParts', 'pdfs', 'boParts'].some(k => stageNeedsSending(_submitState[k]));
 }
 
 // The notification bar is transient and single-purpose: information only.
@@ -1858,7 +1869,7 @@ function refreshSubmitButtonState() {
 function onlyPdfsOutstanding() {
     if (!_submitState) return false;
     const unresolved = ['childParts', 'pdfs', 'boParts']
-        .filter(k => ['pending', 'failed', 'todo'].includes(_submitState[k]?.status));
+        .filter(k => stageNeedsSending(_submitState[k]));
     return unresolved.length === 1 && unresolved[0] === 'pdfs';
 }
 
@@ -4090,7 +4101,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 ["Quantity", "Description", "Material"].forEach(col => {
                     if (row[col]) row[col].confidence = 0;
                 });
-            });            
+                // hot.clear() cannot touch PartNumber: it is filtered out of
+                // visibleColumns, so Handsontable has no column for it. Left
+                // behind, its text kept the row non-blank, which saved a draft
+                // straight after a successful submit and offered to "restore"
+                // it on the next load.
+                row.PartNumber = { text: "", confidence: 0 };
+                // These drive the warning icons. hot.clear() empties the cell
+                // values but knows nothing about them, so the red ! survived a
+                // cleared table.
+                delete row._missingDrawing;
+                delete row._needsReview;
+                delete row._similarityScore;
+            });
+            hot.render();
             console.log("✅ Table cleared to default state");
         }
 
@@ -4268,10 +4292,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 (st.status === 'done' ? done : outstanding).push(k);
             });
 
-            // Weak signal only: both endpoints bump the same counter, so an
-            // advance proves at least one stage landed, never which one.
+            // A 'pending' stage means the request went out and no reply came
+            // back — we genuinely cannot tell whether Glide stored it. Always
+            // say so; the item counter only sharpens the warning.
             const pending = ['childParts', 'pdfs', 'boParts'].filter(k => _submitState[k]?.status === 'pending');
-            const uncertain = pending.length && currentItemParam() >= (_submitState.maxItemNumber || 0);
+            const counterMoved = currentItemParam() >= (_submitState.maxItemNumber || 0);
 
             const line = (k, cls) => {
                 const n = k === 'pdfs' ? (_submitState.pdfs.remaining || []).length : stageRowCount(k);
@@ -4282,9 +4307,12 @@ document.addEventListener('DOMContentLoaded', () => {
             let body = 'Your last submission did not finish.<br><br>';
             if (done.length) body += `<strong>Already saved to Glide:</strong>${done.map(k => line(k, 'draft-stage-done')).join('')}<br>`;
             if (outstanding.length) body += `<strong>Not yet saved:</strong>${outstanding.map(k => line(k, 'draft-stage-todo')).join('')}<br>`;
-            body += uncertain
-                ? `One request may have reached Glide without replying. Check Glide before sending again.<br><br>`
-                : '';
+            if (pending.length) {
+                body += `<strong>Outcome unknown:</strong> ${pending.map(k => escapeHtml(STAGE_LABELS[k])).join(', ')} ` +
+                        `— the request was sent but no reply came back, so it may or may not have saved.` +
+                        (counterMoved ? ` The item counter has moved, which suggests something did land.` : ``) +
+                        ` <strong>Check Glide before sending again.</strong><br><br>`;
+            }
             body += onlyPdfsOutstanding()
                 ? `All BOM data is saved. Only the placeholder drawing is missing — review, then press <strong>Create drawing</strong>.`
                 : `Review the table, then press <strong>Send remaining</strong>. Rows already saved are locked and will not be sent twice.`;
@@ -4377,7 +4405,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // ── Stage 1: Child Parts ───────────────────────────────────
                 // Skipped outright when a previous attempt already landed it —
                 // this is what stops a retry duplicating rows in Glide.
-                if (_submitState.childParts.status === 'todo' || _submitState.childParts.status === 'failed') {
+                if (stageNeedsSending(_submitState.childParts)) {
                     _submitState.childParts.status = 'pending';
                     saveDraftNow();
                     let respChild;
@@ -4416,7 +4444,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // ── Stage 2: one placeholder PDF per missing drawing ────────
                 // Tracked per part: each call also adds a row to the Drawing
                 // table, so re-sending one already done would duplicate it.
-                if (_submitState.pdfs.status === 'todo' || _submitState.pdfs.status === 'failed') {
+                if (stageNeedsSending(_submitState.pdfs)) {
                     _submitState.pdfs.status = 'pending';
                     saveDraftNow();
                     const remaining = (_submitState.pdfs.remaining || []).slice();
@@ -4463,7 +4491,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 // ── Stage 3: BO Parts ──────────────────────────────────────
-                if (_submitState.boParts.status === 'todo' || _submitState.boParts.status === 'failed') {
+                if (stageNeedsSending(_submitState.boParts)) {
                     _submitState.boParts.status = 'pending';
                     saveDraftNow();
                     let respBo;
@@ -4517,9 +4545,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (_submitState?.childParts?.status === 'done') done.push('Child Parts');
                 if (_submitState?.pdfs?.status === 'done') done.push('Missing-drawing PDFs');
                 if (_submitState?.boParts?.status === 'done') done.push('BO Parts');
+                // error.message can carry the entire server response body, or a
+                // whole source snippet for a TypeError. The bar is one line —
+                // keep it short and put the full detail in the console above.
+                const raw = String(error.message || 'Unknown error');
+                const brief = raw.length > 110 ? raw.slice(0, 110).trimEnd() + '…' : raw;
                 showNotification(
-                    `Error adding data: ${error.message}` +
-                    (done.length ? `\nAlready saved to Glide (will not be resent): ${done.join(', ')}.` : ''),
+                    `${brief}` +
+                    (done.length ? `\nAlready saved (not resent): ${done.join(', ')}.` : '') +
+                    `\nSee the browser console for details.`,
                     'error'
                 );
                 saveDraftNow();
