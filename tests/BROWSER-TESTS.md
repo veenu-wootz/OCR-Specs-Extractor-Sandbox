@@ -42,22 +42,23 @@ below will appear to do nothing.
 Paste this into the iframe console. It makes one endpoint fail while everything
 else works normally.
 
+Set `__breakUrl` to whichever you want to break: `/add-bo-parts`,
+`/add-child-parts` or `/generate-missing-childpart-pdf`.
+
+> No `//` comments below, deliberately. Some consoles collapse newlines when you
+> paste, which turns everything after the first `//` into a comment and silently
+> swallows the rest of the snippet.
+
 ```js
-// Save the real fetch once, so we can put it back later.
 window.__origFetch = window.__origFetch || window.fetch;
-
-// Choose what to break: '/add-bo-parts', '/add-child-parts',
-// or '/generate-missing-childpart-pdf'
 window.__breakUrl = '/add-bo-parts';
-
 window.fetch = (url, opts) => {
   if (String(url).includes(window.__breakUrl)) {
-    console.warn('[test] forcing failure for', window.__breakUrl);
-    return Promise.resolve(new Response('forced failure for testing', { status: 500 }));
+    return Promise.resolve(new Response('forced failure', { status: 500 }));
   }
   return window.__origFetch(url, opts);
 };
-console.log('[test] failure injection active for', window.__breakUrl);
+console.log('[test] breaking ' + window.__breakUrl);
 ```
 
 **To stop breaking it** — use this exact snippet, which is safe to run at any time:
@@ -75,8 +76,21 @@ if (typeof window.__origFetch === 'function') {
 > If the page has reloaded since you injected the failure, `__origFetch` is
 > `undefined`, and that line assigns `undefined` to `window.fetch` — **deleting the
 > browser's fetch entirely.** Every request then fails with *"fetch is not a
-> function"*, including ones you never meant to break. The tell is the console
-> echoing `undefined` after the assignment. If it happens, just reload the page.
+> function"*, including ones you never meant to break. If it happens, just reload
+> the page.
+
+### Reading `undefined` in the console
+
+Two different meanings, worth separating:
+
+| You ran | Console shows `undefined` means |
+|---|---|
+| `window.fetch = window.__origFetch;` | the assigned value was `undefined` — **fetch is now broken** |
+| The `if (...) { } else { }` snippet | nothing at all; an if-statement always evaluates to `undefined`. Read the printed `[test] …` line instead |
+| `hot.refreshDimensions()` | nothing; that method returns no value. It still ran |
+
+Only the first is a problem. If a call had genuinely failed you would see an
+error such as *"Cannot read properties of undefined"*, not a plain `undefined`.
 
 Three things to know:
 
@@ -209,3 +223,69 @@ earlier testing: 1 and 2 survive, 3 does not — which is why the
 
 This one regressed before: cell metadata persists between renders, so the class
 was applied but never removed.
+
+---
+
+## Troubleshooting: "the table only responds when DevTools is open"
+
+Opening DevTools is itself a change — it resizes the viewport, which makes
+Handsontable recalculate. So the console cannot diagnose this; you have to rule
+things out from the outside in.
+
+### Step 1 — what is actually receiving the click?
+
+The most decisive test, and it needs no code.
+
+**Right-click directly on a cell you cannot edit → Inspect.**
+
+Look at which element highlights in the Elements panel:
+
+- **`<div id="draft-modal-backdrop">`** → an invisible full-screen overlay is
+  swallowing your clicks. That is the bug, and it is ours.
+- **the `<td>` itself** → clicks are reaching the cell, so the problem is inside
+  Handsontable (dimensions or focus), not an overlay.
+
+### Step 2 — separate "DevTools open" from "viewport resized"
+
+1. Open DevTools, then undock it into its own window
+   (**⋮ menu → Dock side → Undock into separate window**).
+2. Reload and reproduce the failed state.
+3. Without touching the DevTools window, try to edit a BO cell.
+
+- **Still broken while DevTools is open but undocked** → the console is not the
+  factor; the *resize* was. Points at stale Handsontable dimensions.
+- **Works fine undocked** → it is about focus moving between windows, not size.
+
+### Step 3 — one-shot state dump
+
+Paste this when the table is unresponsive. No `//` comments, safe to paste.
+
+```js
+(function(){
+  var r = {};
+  var b = document.getElementById('draft-modal-backdrop');
+  r.modalBackdrop = b ? getComputedStyle(b).display : 'missing';
+  r.modalPointerEvents = b ? getComputedStyle(b).pointerEvents : '-';
+  try { r.lockedRows = Array.from(_lockedRows); } catch (e) { r.lockedRows = 'unreachable'; }
+  try {
+    r.rowCount = hot.countRows();
+    r.readOnlyFirst6 = [];
+    for (var i = 0; i < Math.min(r.rowCount, 6); i++) {
+      r.readOnlyFirst6.push(i + ':' + !!hot.getCellMeta(i, 0).readOnly);
+    }
+    r.containerHeight = document.getElementById('hot').clientHeight;
+    r.hotHeight = hot.rootElement.clientHeight;
+  } catch (e) { r.hot = 'unreachable: ' + e.message; }
+  console.log(JSON.stringify(r, null, 2));
+  return r;
+})()
+```
+
+How to read it:
+
+| Result | Meaning |
+|---|---|
+| `modalBackdrop: "block"` | the overlay never closed — it is eating every click |
+| `readOnlyFirst6` shows `true` on a row that is not a saved Child Part | the row-locking is wrong |
+| `containerHeight` and `hotHeight` differ noticeably | Handsontable's cached size is stale; `hot.refreshDimensions()` should fix it |
+| everything looks right | the problem is focus, not layout or locking |
