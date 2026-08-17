@@ -23,6 +23,9 @@ objects and runs the real code under Node.
 | 4 | staged submit end-to-end against a mocked fetch: partial failure, retry, fix-and-retry, added rows, PDF stage |
 | 5 | notification priority and hold-until-resolved behaviour |
 
+See [BROWSER-TESTS.md](BROWSER-TESTS.md) for the manual tests that cover what
+these cannot — step by step, including how to inject a failure from the console.
+
 ## What this does NOT cover
 
 Everything that needs a real browser: Handsontable rendering, `readOnly`
