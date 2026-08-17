@@ -1778,14 +1778,30 @@ function describeAge(ms) {
 function recomputeLockedRows() {
     _lockedRows = new Set();
     if (!_submitState) return;
+    // Driven by `sent`, not by stage status: a completed stage that has picked
+    // up newly added rows goes back to 'todo', but the rows it already wrote to
+    // Glide must stay locked.
     ['childParts', 'boParts'].forEach(stageName => {
-        const st = _submitState[stageName];
-        if (st && st.status === 'done') {
-            (st.payload || []).forEach(r => {
-                if (typeof r._pRow === 'number') _lockedRows.add(r._pRow);
-            });
-        }
+        (_submitState[stageName]?.sent || []).forEach(r => {
+            if (typeof r._pRow === 'number') _lockedRows.add(r._pRow);
+        });
     });
+}
+
+// Drafts written before `sent` existed keep a completed stage's rows in
+// `payload`. Move them across so locking and rebuilds behave.
+function normalizeSubmitState(st) {
+    if (!st) return st;
+    ['childParts', 'boParts'].forEach(k => {
+        const stage = st[k];
+        if (!stage) return;
+        if (!Array.isArray(stage.sent)) {
+            stage.sent = (stage.status === 'done') ? (stage.payload || []) : [];
+            if (stage.status === 'done') stage.payload = [];
+        }
+        if (!Array.isArray(stage.payload)) stage.payload = [];
+    });
+    return st;
 }
 
 // Stage statuses: 'todo' (built, not attempted) | 'pending' (request sent,
@@ -2329,7 +2345,7 @@ if (!_restoredThisLoad) showDefaultInstructions();
                 if (draft && Array.isArray(draft.rows) && draft.rows.length) {
                     spreadsheetData = draft.rows.map(normalizeRow);
                     while (spreadsheetData.length < 5) spreadsheetData.push(blankRow());
-                    _submitState = draft.submitState || null;
+                    _submitState = normalizeSubmitState(draft.submitState || null);
                     recomputeLockedRows();
                     restored = draft;
                     // Seed both fingerprints from what we just loaded, so simply
@@ -4183,15 +4199,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 maxItemNumber = Math.max(maxItemNumber, item.itemNumber);
             });
 
+            // `payload` is what to send next; `sent` is the record of what Glide
+            // already holds. Keeping them apart is what lets a completed stage
+            // accept rows added afterwards without re-sending the earlier ones.
             return {
                 submissionId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 startedAt: Date.now(),
                 itemBase: lastOcrBomItem,
                 maxItemNumber,
-                childParts: { status: childRows.length ? 'todo' : 'skipped', payload: childRows },
+                childParts: { status: childRows.length ? 'todo' : 'skipped', payload: childRows, sent: [] },
                 pdfs: { status: missingParts.length ? 'todo' : 'skipped', remaining: missingParts, done: [] },
-                boParts: { status: boRows.length ? 'todo' : 'skipped', payload: boRows }
+                boParts: { status: boRows.length ? 'todo' : 'skipped', payload: boRows, sent: [] }
             };
+        }
+
+        // Called once when a stage's request succeeds.
+        function markStageSent(key) {
+            const st = _submitState[key];
+            if (!st) return;
+            st.sent = (st.sent || []).concat(st.payload || []);
+            st.payload = [];
+            st.status = 'done';
         }
 
         // A locked row that no longer matches what was sent means an edit slipped
@@ -4201,8 +4229,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const diverged = [];
             ['childParts', 'boParts'].forEach(stageName => {
                 const st = _submitState?.[stageName];
-                if (!st || st.status !== 'done') return;
-                (st.payload || []).forEach(sent => {
+                if (!st) return;
+                (st.sent || []).forEach(sent => {
                     const row = spreadsheetData[sent._pRow];
                     if (!row) return;
                     const nowQty = row.Quantity?.text?.trim() || "";
@@ -4218,11 +4246,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const STAGE_LABELS = { childParts: 'Child Parts', pdfs: 'Placeholder drawings', boParts: 'BO Parts' };
 
-        function stageRowCount(key) {
+        function stageRowCount(key, which) {
             const st = _submitState?.[key];
             if (!st) return 0;
-            if (key === 'pdfs') return (st.remaining || []).length + (st.done || []).length;
-            return (st.payload || []).length;
+            if (key === 'pdfs') return which === 'sent'
+                ? (st.done || []).length
+                : (st.remaining || []).length;
+            return which === 'sent' ? (st.sent || []).length : (st.payload || []).length;
         }
 
         // Informational only, with a single acknowledge. The user is never
@@ -4239,9 +4269,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Item numbers already assigned in this submission must never be
             // reused, or a newly inserted row could collide with one already
-            // written to Glide.
+            // written to Glide. Counts both what was sent and what is queued.
             const used = new Set();
             ['childParts', 'boParts'].forEach(k => {
+                (_submitState[k]?.sent || []).forEach(r => used.add(r.itemNumber));
                 (_submitState[k]?.payload || []).forEach(r => used.add(r.itemNumber));
             });
             let nextItem = Math.max(_submitState.maxItemNumber || 0, _submitState.itemBase || 0);
@@ -4261,12 +4292,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             };
 
+            // Every stage is rebuilt, including completed ones — a stage that
+            // already succeeded can still gain rows the user typed afterwards,
+            // and those must go out. Rows already written are excluded by
+            // physical row index, so they are never sent twice.
             ['childParts', 'boParts'].forEach(k => {
                 const st = _submitState[k];
-                if (!st || st.status === 'done') return;          // frozen
-                st.payload = remap(fresh[k].payload || [], st.payload);
-                if (!st.payload.length) st.status = 'skipped';
-                else if (st.status === 'skipped') st.status = 'todo';   // rows added since
+                if (!st) return;
+                const alreadySent = new Set((st.sent || [])
+                    .map(r => r._pRow).filter(n => typeof n === 'number'));
+                const outstanding = (fresh[k].payload || []).filter(r => !alreadySent.has(r._pRow));
+                st.payload = remap(outstanding, st.payload);
+
+                if (!st.payload.length) {
+                    // Nothing left to send: completed if anything went out.
+                    st.status = (st.sent || []).length ? 'done' : 'skipped';
+                } else if (st.status === 'done' || st.status === 'skipped') {
+                    st.status = 'todo';        // reopened by rows added since
+                }
+                // 'todo' | 'failed' | 'pending' already mean "runnable" — leave them.
             });
 
             const pdfs = _submitState.pdfs;
@@ -4279,6 +4323,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             let mx = _submitState.itemBase || 0;
             ['childParts', 'boParts'].forEach(k => {
+                (_submitState[k]?.sent || []).forEach(r => { mx = Math.max(mx, r.itemNumber); });
                 (_submitState[k]?.payload || []).forEach(r => { mx = Math.max(mx, r.itemNumber); });
             });
             _submitState.maxItemNumber = mx;
@@ -4289,7 +4334,8 @@ document.addEventListener('DOMContentLoaded', () => {
             ['childParts', 'pdfs', 'boParts'].forEach(k => {
                 const st = _submitState[k];
                 if (!st || st.status === 'skipped') return;
-                (st.status === 'done' ? done : outstanding).push(k);
+                if (stageRowCount(k, 'sent') > 0) done.push(k);
+                if (stageNeedsSending(st) && stageRowCount(k, 'todo') > 0) outstanding.push(k);
             });
 
             // A 'pending' stage means the request went out and no reply came
@@ -4299,7 +4345,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const counterMoved = currentItemParam() >= (_submitState.maxItemNumber || 0);
 
             const line = (k, cls) => {
-                const n = k === 'pdfs' ? (_submitState.pdfs.remaining || []).length : stageRowCount(k);
+                const n = stageRowCount(k, cls === 'draft-stage-done' ? 'sent' : 'todo');
                 const label = STAGE_LABELS[k];
                 return `<div class="${cls}">• ${escapeHtml(label)}${n ? ` (${n})` : ''}</div>`;
             };
@@ -4386,7 +4432,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const boPartsPayload = _submitState.boParts.payload || [];
                 const maxItemNumber = _submitState.maxItemNumber;
 
-                if (!childPartsPayload.length && !boPartsPayload.length) {
+                const pdfsOutstanding = stageNeedsSending(_submitState.pdfs)
+                    && (_submitState.pdfs.remaining || []).length > 0;
+                const anythingSent = ['childParts', 'boParts']
+                    .some(k => (_submitState[k].sent || []).length > 0)
+                    || (_submitState.pdfs.done || []).length > 0;
+                if (!childPartsPayload.length && !boPartsPayload.length && !pdfsOutstanding && !anythingSent) {
                     throw new Error("No data was processed");
                 }
 
@@ -4435,7 +4486,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         saveDraftNow();
                         throw new Error(`Failed to add Child Parts: ${await respChild.text()}`);
                     }
-                    _submitState.childParts.status = 'done';
+                    markStageSent('childParts');
                     recomputeLockedRows();
                     saveDraftNow();
                     if (hot) hot.render();
@@ -4520,7 +4571,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         saveDraftNow();
                         throw new Error(`Failed to add BO Parts: ${await respBo.text()}`);
                     }
-                    _submitState.boParts.status = 'done';
+                    markStageSent('boParts');
                     recomputeLockedRows();
                     saveDraftNow();
                     if (hot) hot.render();

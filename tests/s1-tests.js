@@ -36,12 +36,13 @@ ok('corrupt cell -> shape', n2.Quantity.text===''&&n2.Quantity.confidence===0);
 ok('bad Type -> empty', n2.Type==='');
 ok('null -> blank row', isRowBlank(normalizeRow(null)));
 T.head('locks / unresolved');
-_submitState={childParts:{status:'done',payload:[{_pRow:0},{_pRow:2}]},
-  pdfs:{status:'skipped'},boParts:{status:'failed',payload:[{_pRow:3}]}};
+_submitState={childParts:{status:'done',sent:[{_pRow:0},{_pRow:2}],payload:[]},
+  pdfs:{status:'skipped'},boParts:{status:'failed',sent:[],payload:[{_pRow:3}]}};
 recomputeLockedRows();
 ok('done rows locked', _lockedRows.has(0)&&_lockedRows.has(2));
 ok('failed rows not locked', !_lockedRows.has(3));
 ok('unresolved', hasUnresolvedSubmit()===true);
+_submitState.boParts.sent=_submitState.boParts.payload; _submitState.boParts.payload=[];
 _submitState.boParts.status='done'; recomputeLockedRows();
 ok('all done -> resolved', hasUnresolvedSubmit()===false);
 ok('bo rows now locked', _lockedRows.has(3));

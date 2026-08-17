@@ -121,5 +121,48 @@ T.head('K: every outstanding status is runnable by the executor');
 });
 ok('button and executor agree on every status', true);
 
+
+T.head('L: rows added to an ALREADY-COMPLETED stage must still be sent');
+reset(); spreadsheetData=[mkRow('Child Part','2','D-1'),mkRow('BO','3','B-1')];
+PLAN={'/add-bo-parts':'fail'};
+await sendDataToBackend();
+ok('child stage completed', _submitState.childParts.status==='done');
+ok('its rows recorded as sent', _submitState.childParts.sent.length===1);
+const sentItem=_submitState.childParts.sent[0].itemNumber;
+
+spreadsheetData.push(mkRow('Child Part','9','D-2'));   // new CHILD row, stage already done
+PLAN={};
+await sendDataToBackend();
+ok('child stage ran again for the new row', countCalls('/add-child-parts')===2);
+const body=lastBody('/add-child-parts');
+ok('only the NEW row was sent', body.rows.length===1);
+ok('and it is the new one', body.rows[0].quantity==='9');
+ok('new row got a fresh item number', body.rows[0].itemNumber!==sentItem);
+ok('bo also went out', countCalls('/add-bo-parts')===2);
+ok('submission completed', _submitState===null);
+
+T.head('M: a completed stage with NO additions is not re-sent');
+reset(); spreadsheetData=[mkRow('Child Part','2','D-1'),mkRow('BO','3','B-1')];
+PLAN={'/add-bo-parts':'fail'};
+await sendDataToBackend();
+PLAN={};
+await sendDataToBackend();
+ok('child sent exactly once', countCalls('/add-child-parts')===1);
+ok('bo retried', countCalls('/add-bo-parts')===2);
+
+T.head('N: previously sent rows stay locked while the stage reopens');
+reset(); spreadsheetData=[mkRow('Child Part','2','D-1')];
+PLAN={};
+await sendDataToBackend();
+ok('all done, draft cleared', _submitState===null);
+reset(); spreadsheetData=[mkRow('Child Part','2','D-1'),mkRow('BO','3','B-1')];
+PLAN={'/add-bo-parts':'fail'};
+await sendDataToBackend();
+spreadsheetData.push(mkRow('Child Part','5','D-3'));
+rebuildOutstandingStages();
+ok('original child row still locked', _lockedRows.has(0));
+ok('newly added child row not locked', !_lockedRows.has(2));
+ok('stage reopened as runnable', stageNeedsSending(_submitState.childParts)===true);
+
 T.done();
 })();
