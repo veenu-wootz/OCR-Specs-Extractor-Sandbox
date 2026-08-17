@@ -480,6 +480,12 @@
             color: #eaeaea;
         }
 
+        /* The dialog receives focus on open so focus moves into the modal;
+           it is not an interactive control, so it shows no ring. */
+        #draft-modal-card:focus {
+            outline: none;
+        }
+
         #draft-modal-card h3 {
             margin: 0 0 10px 0;
             font-size: 16px;
@@ -522,6 +528,15 @@
         }
 
         #draft-modal-actions button:hover { opacity: 0.88; }
+
+        /* Suppress the UA ring on click, keep a themed one for keyboard users
+           (:focus-visible only matches keyboard navigation). */
+        #draft-modal-actions button:focus { outline: none; }
+
+        #draft-modal-actions button:focus-visible {
+            outline: 2px solid #f0c14b;
+            outline-offset: 2px;
+        }
 
         /* Autosave state pill. Deliberately outside the notification bar, which
            is transient real estate. Only rendered when persistence is not
@@ -1809,8 +1824,12 @@ function openDraftModal(title, bodyHtml, actions) {
 
     backdrop.classList.add('open');
     backdrop.setAttribute('aria-hidden', 'false');
-    const first = box.querySelector('button.primary') || box.querySelector('button');
-    if (first) first.focus();
+    // Focus the dialog itself, not a button. Focus still moves into the modal
+    // (so keyboard and screen-reader users aren't stranded behind it), but
+    // programmatically focusing the button made Chromium paint its blue focus
+    // ring around it on open. Tabbing still reaches the buttons normally.
+    const card = document.getElementById('draft-modal-card');
+    if (card) card.focus({ preventScroll: true });
 }
 
 function closeDraftModal() {
@@ -4574,7 +4593,7 @@ document.addEventListener('DOMContentLoaded', () => {
 <!-- Draft restore / unfinished-submission prompt. Its own element rather than
      reusing the instructions modal, which carries hover and auto-close timers. -->
 <div id="draft-modal-backdrop" aria-hidden="true">
-  <div id="draft-modal-card" role="dialog" aria-modal="true" aria-labelledby="draft-modal-title">
+  <div id="draft-modal-card" role="dialog" aria-modal="true" aria-labelledby="draft-modal-title" tabindex="-1">
     <h3 id="draft-modal-title"></h3>
     <div id="draft-modal-body"></div>
     <div id="draft-modal-actions"></div>
