@@ -26,6 +26,19 @@ objects and runs the real code under Node.
 See [BROWSER-TESTS.md](BROWSER-TESTS.md) for the manual tests that cover what
 these cannot — step by step, including how to inject a failure from the console.
 
+## The render check
+
+`run.sh` finishes by loading the page in headless Chrome and asserting that
+Handsontable actually rendered — an error thrown out of a cell renderer leaves a
+blank table that no amount of logic testing can see. It fails on any uncaught
+JavaScript error during load, and on a cell count below what a seeded table
+produces.
+
+This exists because a change that passed every logic suite still shipped a blank
+table: the renderer runs while `hot = new Handsontable(...)` is still being
+evaluated, so calling anything that dereferences `hot` throws during the first
+paint.
+
 ## What this does NOT cover
 
 Everything that needs a real browser: Handsontable rendering, `readOnly`

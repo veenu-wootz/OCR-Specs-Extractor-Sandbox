@@ -2724,7 +2724,9 @@ if (!_restoredThisLoad) showDefaultInstructions();
                             // left its message on screen with nothing to clear
                             // it. The gate still allows just one refresh per
                             // user edit, so this adds no extra work.
-                            requestNotificationRefreshOnce();
+                            // Skipped on the very first paint, when `hot` is not
+                            // assigned yet (see refreshNotifications).
+                            if (hot) requestNotificationRefreshOnce();
 
                         } else if (isOCRcol) {
                             // OCR columns: color by confidence
@@ -4005,6 +4007,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Complete refreshNotifications function - handles all error/warning types
         function refreshNotifications() {
+            // The renderer runs while `hot = new Handsontable(...)` is still
+            // evaluating, so during the first paint this global is not assigned
+            // yet. Without this guard the call below throws, the renderer throws
+            // with it, and Handsontable aborts — leaving a blank table.
+            if (!hot) return;
+
             // Reset notification flag to allow new notifications
             hasWarningNotificationShown = false;
             

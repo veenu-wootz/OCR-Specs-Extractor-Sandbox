@@ -21,6 +21,11 @@ run "suite 5: notif priority"  "$D/stubs.js" "$D/s5-notifenv.js" "$D/notif.js" "
 run "suite 6: draft lifecycle" "$D/stubs.js" "$D/s6-draftlifecycle.js" "$D/draftcore.js" "$D/s6-tests.js"
 run "suite 7: submit validation" "$D/stubs.js" "$D/s7-validateenv.js" "$D/validate.js" "$D/s7-tests.js"
 run "suite 8: duplicate marking" "$D/stubs.js" "$D/s8-dupesenv.js" "$D/dupes.js" "$D/s8-tests.js"
+run "suite 9: first paint"      "$D/stubs.js" "$D/s9-firstpaintenv.js" "$D/notifscan.js" "$D/s9-tests.js"
 rm -f "$D/.run.js"
-echo; [ $rc -eq 0 ] && echo "ALL SUITES PASSED" || echo "SOME SUITES FAILED"
+
+echo; echo "───── render check (real browser)"
+if "$D/render-check.sh" "$SRC"; then :; else rc=1; fi
+
+echo; [ $rc -eq 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
 exit $rc
