@@ -538,23 +538,29 @@
             outline-offset: 2px;
         }
 
-        /* Autosave state pill. Deliberately outside the notification bar, which
-           is transient real estate. Only rendered when persistence is not
-           reliable — see AUTOSAVE_BADGE_WHEN. */
-        #autosave-badge {
-            margin-right: 10px;
-            padding: 1px 7px;
-            font-size: 10px;
-            font-weight: 500;
-            letter-spacing: 0.02em;
-            color: #8a8a8a;
-            border: 1px solid #3a3a3a;
-            border-radius: 9px;
+        /* Storage caveat. Plain text under the Submit button, right aligned —
+           read once or twice and then ignored, so it earns no chrome. Only
+           rendered when persistence is unreliable (see AUTOSAVE_BADGE_WHEN),
+           and it is a normal block in the flow rather than an overlay, so it
+           can never sit on top of the column-header upload zones. */
+        #autosave-note {
+            text-align: right;
+            font-size: 11px;
+            line-height: 1.3;
+            color: #7d7d7d;
+            padding: 0 2px 3px 0;
             white-space: nowrap;
-            cursor: default;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
-        #autosave-badge:hover { color: #c9a227; border-color: #6b5410; }
+        /* #handsontable-container has a hard-coded viewport height, so it does
+           not shrink on its own when the header grows — without this the note's
+           height would be clipped off the bottom of the table. Applied only
+           when the note exists, so nobody else loses any space. */
+        .has-autosave-note #handsontable-container {
+            height: calc(100vh - 97px);
+        }
 
         .handsontable td.type-missing-childpart {
             color:#fc5f67 !important;
@@ -2486,25 +2492,21 @@ if (!_restoredThisLoad) showDefaultInstructions();
         function markAutosaveUnavailable() {
             if (!DraftStore.durable()) console.warn(`[draft] non-durable storage: ${DraftStore.kind()}`);
             if (!AUTOSAVE_BADGE_WHEN) return;
-            if (document.getElementById('autosave-badge')) return;
-            // Sits immediately left of Submit: that is where attention already
-            // goes, and the warning is worthless if it is missed. Styled as a
-            // muted pill with no button affordance so it does not read as an
-            // action, or as a label belonging to Submit.
-            const buttons = document.querySelector('#table-action-buttons .buttons-container');
-            const area = buttons || document.getElementById('table-action-buttons');
-            if (!area) return;
-            const badge = document.createElement('span');
-            badge.id = 'autosave-badge';
-            badge.textContent = DraftStore.kind() === 'memory'
-                ? 'Autosave off'
-                : 'Autosave: session only';
-            badge.title = DraftStore.kind() === 'memory'
-                ? 'This browser blocks storage for embedded pages, so work cannot be saved across reloads.'
-                : 'Work is kept across reloads, but may not survive closing the browser. Depends on browser settings.';
-            const submitBtn = document.getElementById('submit-btn');
-            if (buttons && submitBtn) area.insertBefore(badge, submitBtn);
-            else area.insertBefore(badge, area.firstChild);
+            if (document.getElementById('autosave-note')) return;
+            const header = document.getElementById('fixed-header-area');
+            if (!header) return;
+            // Sits under the Submit button, right aligned. No tooltip: the line
+            // says what it means, which also keeps the header down to a single
+            // hover target (the info icon).
+            const note = document.createElement('div');
+            note.id = 'autosave-note';
+            note.textContent = DraftStore.kind() === 'memory'
+                ? 'Autosave off — work is not being saved in this browser.'
+                : 'Autosave: this session only — work may be lost if you close the browser.';
+            header.appendChild(note);
+            // Compensates for the header growing; see .has-autosave-note in CSS.
+            const root = document.getElementById('main-container');
+            if (root) root.classList.add('has-autosave-note');
         }
 
         // ─────────────────────────────────────────────────────────────────────
