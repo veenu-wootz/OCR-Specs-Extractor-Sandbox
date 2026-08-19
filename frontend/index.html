@@ -2401,7 +2401,11 @@ if (!_restoredThisLoad) showDefaultInstructions();
                 replayEditedCellMeta();
                 announceRestore(restored);
             }
-            if (!DraftStore.durable()) markAutosaveUnavailable();
+            // Gate on the same constant the function uses. Guarding on
+            // durable() alone meant Safari never reached it: localStorage is
+            // writable there, so the probe passes, and the pill never showed on
+            // the one browser that actually needs it.
+            if (AUTOSAVE_BADGE_WHEN) markAutosaveUnavailable();
         }
 
         // Nothing visual depends on this — an edited cell carries confidence 0,
