@@ -20,6 +20,7 @@ run "suite 4: staged submit"   "$D/stubs.js" "$D/s4-e2eenv.js" "$D/draftcore.js"
 run "suite 5: notif priority"  "$D/stubs.js" "$D/s5-notifenv.js" "$D/notif.js" "$D/s5-tests.js"
 run "suite 6: draft lifecycle" "$D/stubs.js" "$D/s6-draftlifecycle.js" "$D/draftcore.js" "$D/s6-tests.js"
 run "suite 7: submit validation" "$D/stubs.js" "$D/s7-validateenv.js" "$D/validate.js" "$D/s7-tests.js"
+run "suite 8: duplicate marking" "$D/stubs.js" "$D/s8-dupesenv.js" "$D/dupes.js" "$D/s8-tests.js"
 rm -f "$D/.run.js"
 echo; [ $rc -eq 0 ] && echo "ALL SUITES PASSED" || echo "SOME SUITES FAILED"
 exit $rc

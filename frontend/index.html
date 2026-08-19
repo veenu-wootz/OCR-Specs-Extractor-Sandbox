@@ -1932,6 +1932,33 @@ function isDuplicateChildpartSelection(value, rowIndex) {
     const used = getUsedChildparts(rowIndex);
     return used.has(value.toString().trim());
 }
+
+// Physical row indices that repeat a drawing already claimed by an earlier row.
+// Derived on demand rather than stored as a flag, so it cannot go stale: fix or
+// delete the offending row and it simply stops being reported.
+//
+// Only rows bound for the Child Parts table count (Child Part, Missing Drawing),
+// matching the submit-time check. Compared after the same normalisation
+// sendDataToBackend applies, so "D.1.0" and "D10" are one drawing.
+//
+// The FIRST occurrence is left clean and later ones are marked, so the row to
+// correct is the obvious one. O(rows) per call, and the tool is designed for
+// well under ten rows.
+function duplicateChildPartRows() {
+    const seen = new Map();
+    const dupes = new Set();
+    spreadsheetData.forEach((row, idx) => {
+        if (!row) return;
+        const type = (row.Type || "").trim();
+        if (type !== "Child Part" && type !== TYPE_DISPLAY_NAMES["Missing Childpart"]) return;
+        const raw = (row["Matched Childpart"] || "").toString().trim();
+        if (!raw) return;
+        const key = raw.replaceAll(".", "");
+        if (seen.has(key)) dupes.add(idx);
+        else seen.set(key, idx);
+    });
+    return dupes;
+}
         // Fetch query-params (project, part, parentdrgnum) on load and fetch childParts
         window.addEventListener("DOMContentLoaded", async () => {
             const urlParams = new URLSearchParams(window.location.search);
@@ -2662,6 +2689,12 @@ if (!_restoredThisLoad) showDefaultInstructions();
                                 if (rowData["_missingDrawing"]) {
                                     td.classList.add("quantity-error-cell"); // Red ! icon
                                     errorNeeded = true;
+                                } else if (duplicateChildPartRows().has(row)) {
+                                    // Same red ! as a missing drawing: this row
+                                    // also blocks submit, and the cause is the
+                                    // part number in this cell.
+                                    td.classList.add("quantity-error-cell");
+                                    errorNeeded = true;
                                 }
                             }
 
@@ -2686,11 +2719,12 @@ if (!_restoredThisLoad) showDefaultInstructions();
                                 }
                             }
 
-                            // After both checks, trigger appropriate notification
-                            if ((warningNeeded || errorNeeded) ) {
-                                // hasWarningNotificationShown = true; && !hasWarningNotificationShown
-                                requestNotificationRefreshOnce();
-                            }
+                            // Always ask for a refresh, not only when this pass
+                            // found a problem — otherwise fixing the last issue
+                            // left its message on screen with nothing to clear
+                            // it. The gate still allows just one refresh per
+                            // user edit, so this adds no extra work.
+                            requestNotificationRefreshOnce();
 
                         } else if (isOCRcol) {
                             // OCR columns: color by confidence
@@ -2943,7 +2977,14 @@ if (!_restoredThisLoad) showDefaultInstructions();
                 scheduleDraftSave();
             });
             hot.addHook('afterCreateRow', () => scheduleDraftSave());
-            hot.addHook('afterRemoveRow', () => scheduleDraftSave());
+            hot.addHook('afterRemoveRow', () => {
+                scheduleDraftSave();
+                // Deleting the offending row resolves the issue, but row removal
+                // does not fire afterChange, so nothing released the notification
+                // hold or re-evaluated the table — the error stayed on screen.
+                resetNotificationGate();
+                refreshNotifications();
+            });
 
             // --- keep current value when opening Type / Matched Childpart editors
             hot.addHook('afterBeginEditing', function (row, col) {
@@ -3968,7 +4009,8 @@ document.addEventListener('DOMContentLoaded', () => {
             hasWarningNotificationShown = false;
             
             let highestPriorityNotification = null;
-            
+            const dupRows = duplicateChildPartRows();
+
             // Scan all rows for current issues
             for (let row = 0; row < hot.countRows(); row++) {
                 const rowData = hot.getSourceDataAtRow(row);
@@ -4009,7 +4051,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     break; // Highest priority, stop checking
                 }
                 
-                // PRIORITY 2: Low Similarity Warning - YELLOW ICON + NOTIFICATION  
+                // PRIORITY 2: Duplicate part number - RED ICON + NOTIFICATION
+                // Wording matches the validators exactly, so whichever writes
+                // first there is no visible swap.
+                if (dupRows.has(row)) {
+                    const dupPart = (rowData["Matched Childpart"] || "").toString().trim();
+                    if (!highestPriorityNotification || highestPriorityNotification.priority > 2) {
+                        highestPriorityNotification = {
+                            message: `"${dupPart}" is already used in another Child Part row.`,
+                            type: "error",
+                            priority: 2
+                        };
+                    }
+                }
+
+                // PRIORITY 3: Low Similarity Warning - YELLOW ICON + NOTIFICATION  
                 if (rowData.Type === "Child Part" && rowData._similarityScore !== undefined && rowData._similarityScore < 0.95) {
                     if (!highestPriorityNotification) {
                         highestPriorityNotification = { 

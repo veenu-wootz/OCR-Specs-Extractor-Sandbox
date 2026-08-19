@@ -6,6 +6,7 @@ def grab(a, b, name):
 grab('const DRAFT_PREFIX', '// === One-shot notification gate', 'draftcore.js')
 grab('        // Payload rows carry a _pRow marker', '        function announceUnresolvedSubmit', 'submitcore.js')
 grab('        async function sendDataToBackend(opts = {})', '        // --- Ensure OCR upload header areas', 'sendfn.js')
+grab('// Physical row indices that repeat a drawing', 'window.addEventListener("DOMContentLoaded"', 'dupes.js')
 grab('      function validateRequiredFields', '        function clearTableToDefault', 'validate.js')
 grab('        // Global ranking across ALL notification callers',
      '// --- Default instructions text (single source of truth) ---', 'notif.js')
