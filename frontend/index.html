@@ -4096,12 +4096,45 @@ document.addEventListener('DOMContentLoaded', () => {
     // }
   });
 
+  // Backstop against duplicate child parts reaching Glide.
+  //
+  // The dropdown already prevents this by filtering used values out of its list,
+  // but pasting or typing bypasses that filter, and of the four duplicate checks
+  // only the auto-match one clears the value — the rest warn and keep it. Since
+  // nothing flags the row, the warning is the only evidence, and it disappears as
+  // soon as any other notification replaces it.
+  //
+  // This changes no UI and no input handling: it reuses the existing validation
+  // result, so whichever route created the duplicate, it cannot be submitted.
+  //
+  // Compared after the same normalisation sendDataToBackend applies (trimmed,
+  // dots stripped), so "D.1.0" and "D10" are correctly seen as one drawing —
+  // they would otherwise land in Glide as two identical rows.
+  const seenDrawings = new Map();
+  const duplicateParts = new Set();
+  spreadsheetData.forEach(row => {
+    const type = (row.Type || "").trim();
+    const qty = row.Quantity?.text?.trim();
+    // Mirror the row filter in sendDataToBackend: incomplete rows are not sent,
+    // and are already reported above as missing Type/Quantity.
+    if (!qty || !type) return;
+    if (type !== "Child Part" && type !== TYPE_DISPLAY_NAMES["Missing Childpart"]) return;
+    const raw = (row["Matched Childpart"] || "").toString().trim();
+    if (!raw) return;                       // already reported as a missing Part Number
+    const key = raw.replaceAll(".", "");
+    if (seenDrawings.has(key)) duplicateParts.add(raw);
+    else seenDrawings.set(key, true);
+  });
+
   const messages = [];
   if (missingColumns.size > 0) {
     messages.push(`(${Array.from(missingColumns).join(", ")})`);
   }
   if (invalidColumns.size > 0) {
     messages.push(`Invalid Data (${Array.from(invalidColumns).join(", ")})`);
+  }
+  if (duplicateParts.size > 0) {
+    messages.push(`Duplicate Part Number (${Array.from(duplicateParts).join(", ")})`);
   }
 
   return {
