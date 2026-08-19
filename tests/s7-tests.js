@@ -53,4 +53,43 @@ spreadsheetData=[row('Child Part','1','D-1'),row('Child Part','2','D-2'),row('Ch
 ok('non-adjacent duplicate caught', validateRequiredFields().isValid===false);
 spreadsheetData=[row('Child Part','1','D-1'),row('Child Part','2','D-1'),row('Child Part','3','D-1')];
 ok('three of the same reported once', (dupMsg().match(/D-1/g)||[]).length===1);
+
+T.head('resume: rows already in Glide must not block the rows still to send');
+spreadsheetData=[row('Child Part','1','D-1',{_missingDrawing:true}),row('BO','2','B-1')];
+ok('unscoped, the sent row blocks everything', validateRequiredFields().isValid===false);
+ok('scoped, the outstanding BO row can still go',
+   validateRequiredFields({skipRows:new Set([0]),resume:true}).isValid===true);
+
+T.head('resume: a NEW row duplicating an already-sent one is caught');
+spreadsheetData=[row('Child Part','1','D-100'),row('Child Part','2','D-100')];
+ok('blocked even though row 0 is locked',
+   validateRequiredFields({skipRows:new Set([0]),resume:true}).isValid===false);
+
+T.head('resume: a duplicate wholly among sent rows does not strand the user');
+spreadsheetData=[row('Child Part','1','D-100'),row('Child Part','2','D-100'),row('BO','3','B-9')];
+ok('both locked -> not reported, resume can proceed',
+   validateRequiredFields({skipRows:new Set([0,1]),resume:true}).isValid===true);
+
+T.head('resume: field problems on NEW rows still block');
+spreadsheetData=[row('Child Part','1','D-1'),row('Child Part','abc','D-2')];
+ok('bad quantity on an unsent row blocks',
+   validateRequiredFields({skipRows:new Set([0]),resume:true}).isValid===false);
+spreadsheetData=[row('Child Part','1','D-1'),row('Child Part','2','D-2',{_missingDrawing:true})];
+ok('_missingDrawing on an unsent row blocks',
+   validateRequiredFields({skipRows:new Set([0]),resume:true}).isValid===false);
+
+T.head('resume: PDF-only retry has no outstanding rows and must still pass');
+spreadsheetData=[row('Missing Drawing','1','M-1')];
+ok('all rows sent, nothing outstanding -> valid',
+   validateRequiredFields({skipRows:new Set([0]),resume:true}).isValid===true);
+ok('same table on a FRESH submit is still validated normally',
+   validateRequiredFields().isValid===true);
+
+T.head('fresh submit is byte-identical to before');
+spreadsheetData=[row('Child Part','1','D-1')];
+ok('no-arg call still works', validateRequiredFields().isValid===true);
+spreadsheetData=[];
+ok('empty table still invalid without resume', validateRequiredFields().isValid===false);
+ok('empty table with resume is not blocked', validateRequiredFields({resume:true}).isValid===true);
+
 T.done();

@@ -1,4 +1,5 @@
-      function validateRequiredFields() {
+      function validateRequiredFields(opts = {}) {
+  const skipRows = opts.skipRows || null;
   const missingColumns = new Set();
   const invalidColumns = new Set();
   let hasValidRow = false;
@@ -15,6 +16,11 @@
     if (!type && !qty && !table_partNumber) return;
 
     hasValidRow = true;
+
+    // Already in Glide and read-only — nothing here can be corrected, so a
+    // problem on this row must not block the rows that still need sending.
+    // It still participates in the duplicate scan below.
+    if (skipRows && skipRows.has(idx)) return;
 
     // Collect missing fields
     if (!type) missingColumns.add("Type");
@@ -63,7 +69,7 @@
   // they would otherwise land in Glide as two identical rows.
   const seenDrawings = new Map();
   const duplicateParts = new Set();
-  spreadsheetData.forEach(row => {
+  spreadsheetData.forEach((row, idx) => {
     const type = (row.Type || "").trim();
     const qty = row.Quantity?.text?.trim();
     // Mirror the row filter in sendDataToBackend: incomplete rows are not sent,
@@ -73,8 +79,15 @@
     const raw = (row["Matched Childpart"] || "").toString().trim();
     if (!raw) return;                       // already reported as a missing Part Number
     const key = raw.replaceAll(".", "");
-    if (seenDrawings.has(key)) duplicateParts.add(raw);
-    else seenDrawings.set(key, true);
+    if (seenDrawings.has(key)) {
+      // If both colliding rows are already in Glide there is nothing the user
+      // can do about it here, so reporting it would only block the resume.
+      const firstIdx = seenDrawings.get(key);
+      const bothLocked = skipRows && skipRows.has(idx) && skipRows.has(firstIdx);
+      if (!bothLocked) duplicateParts.add(raw);
+    } else {
+      seenDrawings.set(key, idx);
+    }
   });
 
   const messages = [];
@@ -89,7 +102,7 @@
   }
 
   return {
-    isValid: hasValidRow && messages.length === 0,
+    isValid: (hasValidRow || !!opts.resume) && messages.length === 0,
     missingFields: messages
   };
 }

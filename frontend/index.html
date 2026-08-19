@@ -4047,7 +4047,13 @@ document.addEventListener('DOMContentLoaded', () => {
 }
         }
 
-      function validateRequiredFields() {
+      // opts.skipRows  physical row indices already written to Glide. Their
+      //                field-level problems cannot be fixed from here, so
+      //                checking them would strand a resume permanently.
+      // opts.resume    a resume already has content, so it does not need to find
+      //                an otherwise-valid row (a PDF-only retry has none).
+      function validateRequiredFields(opts = {}) {
+  const skipRows = opts.skipRows || null;
   const missingColumns = new Set();
   const invalidColumns = new Set();
   let hasValidRow = false;
@@ -4064,6 +4070,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!type && !qty && !table_partNumber) return;
 
     hasValidRow = true;
+
+    // Already in Glide and read-only — nothing here can be corrected, so a
+    // problem on this row must not block the rows that still need sending.
+    // It still participates in the duplicate scan below.
+    if (skipRows && skipRows.has(idx)) return;
 
     // Collect missing fields
     if (!type) missingColumns.add("Type");
@@ -4112,7 +4123,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // they would otherwise land in Glide as two identical rows.
   const seenDrawings = new Map();
   const duplicateParts = new Set();
-  spreadsheetData.forEach(row => {
+  spreadsheetData.forEach((row, idx) => {
     const type = (row.Type || "").trim();
     const qty = row.Quantity?.text?.trim();
     // Mirror the row filter in sendDataToBackend: incomplete rows are not sent,
@@ -4122,8 +4133,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const raw = (row["Matched Childpart"] || "").toString().trim();
     if (!raw) return;                       // already reported as a missing Part Number
     const key = raw.replaceAll(".", "");
-    if (seenDrawings.has(key)) duplicateParts.add(raw);
-    else seenDrawings.set(key, true);
+    if (seenDrawings.has(key)) {
+      // If both colliding rows are already in Glide there is nothing the user
+      // can do about it here, so reporting it would only block the resume.
+      const firstIdx = seenDrawings.get(key);
+      const bothLocked = skipRows && skipRows.has(idx) && skipRows.has(firstIdx);
+      if (!bothLocked) duplicateParts.add(raw);
+    } else {
+      seenDrawings.set(key, idx);
+    }
   });
 
   const messages = [];
@@ -4138,7 +4156,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   return {
-    isValid: hasValidRow && messages.length === 0,
+    isValid: (hasValidRow || !!opts.resume) && messages.length === 0,
     missingFields: messages
   };
 }
@@ -4420,9 +4438,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 addDataBtn.disabled = true;
                 addDataBtn.textContent = "Sending...";
 
-                if (!resume) {
-                    // Validate required fields:
-                    const validation = validateRequiredFields();
+                {
+                    // Resuming validates too — it can carry newly added or
+                    // corrected rows, and previously skipped this entirely, so a
+                    // duplicate or a bad quantity added after a partial failure
+                    // went straight to Glide. Rows already sent are excluded
+                    // from the field checks but still counted for duplicates.
+                    const validation = resume
+                        ? validateRequiredFields({ skipRows: _lockedRows, resume: true })
+                        : validateRequiredFields();
                     if (!validation.isValid) {
                         showNotification(
                             `Missing Data:\n${validation.missingFields.join(
