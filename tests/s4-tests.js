@@ -13,7 +13,7 @@ ok('child rows locked', _lockedRows.has(0)&&_lockedRows.has(1));
 ok('bo row not locked', !_lockedRows.has(2));
 ok('table not cleared', CLEARED===0);
 ok('state persisted', DraftStore.get(draftKey())?.submitState?.childParts?.status==='done');
-ok('button = Send remaining', BTN.textContent==='Send remaining');
+ok('button = Submit Remaining', BTN.textContent==='Submit Remaining');
 PLAN={}; await sendDataToBackend();
 ok('child NOT resent', countCalls('/add-child-parts')===1);
 ok('bo resent', countCalls('/add-bo-parts')===2);
@@ -99,7 +99,7 @@ PLAN={'/add-bo-parts':'throw'};          // network-level failure, not a 500
 await sendDataToBackend();
 ok('bo left pending (outcome unknown)', _submitState.boParts.status==='pending');
 ok('counts as unresolved', hasUnresolvedSubmit()===true);
-ok('button offers to continue', BTN.textContent==='Send remaining');
+ok('button offers to continue', BTN.textContent==='Submit Remaining');
 ok('table NOT cleared', CLEARED===0);
 PLAN={};
 await sendDataToBackend();

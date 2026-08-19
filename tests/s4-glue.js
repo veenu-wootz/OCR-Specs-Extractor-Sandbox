@@ -19,5 +19,5 @@ function onlyPdfsOutstanding(){ if(!_submitState)return false;
   const u=['childParts','pdfs','boParts'].filter(k=>['pending','failed','todo'].includes(_submitState[k]?.status));
   return u.length===1&&u[0]==='pdfs'; }
 function refreshSubmitButtonState(){ BTN.textContent=!hasUnresolvedSubmit()?'Submit'
-  :(onlyPdfsOutstanding()?'Create drawing':'Send remaining'); }
+  :(onlyPdfsOutstanding()?'Create drawing':'Submit Remaining'); }
 function reset(){CALLS.length=0;BODIES.length=0;NOTES.length=0;CLEARED=0;_submitState=null;_lockedRows=new Set();}

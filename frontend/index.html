@@ -1879,7 +1879,7 @@ function refreshSubmitButtonState() {
     if (!btn) return;
     if (!hasUnresolvedSubmit()) { btn.textContent = 'Submit'; return; }
     // Data already saved and only the placeholder drawing outstanding.
-    btn.textContent = onlyPdfsOutstanding() ? 'Create drawing' : 'Send remaining';
+    btn.textContent = onlyPdfsOutstanding() ? 'Create drawing' : 'Submit Remaining';
 }
 
 function onlyPdfsOutstanding() {
@@ -2486,8 +2486,14 @@ if (!_restoredThisLoad) showDefaultInstructions();
         function markAutosaveUnavailable() {
             if (!DraftStore.durable()) console.warn(`[draft] non-durable storage: ${DraftStore.kind()}`);
             if (!AUTOSAVE_BADGE_WHEN) return;
-            const area = document.getElementById('table-action-buttons');
-            if (!area || document.getElementById('autosave-badge')) return;
+            if (document.getElementById('autosave-badge')) return;
+            // Sits immediately left of Submit: that is where attention already
+            // goes, and the warning is worthless if it is missed. Styled as a
+            // muted pill with no button affordance so it does not read as an
+            // action, or as a label belonging to Submit.
+            const buttons = document.querySelector('#table-action-buttons .buttons-container');
+            const area = buttons || document.getElementById('table-action-buttons');
+            if (!area) return;
             const badge = document.createElement('span');
             badge.id = 'autosave-badge';
             badge.textContent = DraftStore.kind() === 'memory'
@@ -2496,7 +2502,9 @@ if (!_restoredThisLoad) showDefaultInstructions();
             badge.title = DraftStore.kind() === 'memory'
                 ? 'This browser blocks storage for embedded pages, so work cannot be saved across reloads.'
                 : 'Work is kept across reloads, but may not survive closing the browser. Depends on browser settings.';
-            area.insertBefore(badge, area.firstChild);
+            const submitBtn = document.getElementById('submit-btn');
+            if (buttons && submitBtn) area.insertBefore(badge, submitBtn);
+            else area.insertBefore(badge, area.firstChild);
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -4480,14 +4488,14 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             body += onlyPdfsOutstanding()
                 ? `All BOM data is saved. Only the placeholder drawing is missing — review, then press <strong>Create drawing</strong>.`
-                : `Review the table, then press <strong>Send remaining</strong>. Rows already saved are locked and will not be sent twice.`;
+                : `Review the table, then press <strong>Submit Remaining</strong>. Rows already saved are locked and will not be sent twice.`;
 
             openDraftModal('Unfinished submission', body, [
                 { label: 'Got it', primary: true, onClick: () => {
                     showNotification(
                         onlyPdfsOutstanding()
                             ? 'All data saved. Placeholder drawing still to create.'
-                            : `Already saved: ${done.map(k => STAGE_LABELS[k]).join(', ') || 'nothing'}. Press Send remaining when ready.`,
+                            : `Already saved: ${done.map(k => STAGE_LABELS[k]).join(', ') || 'nothing'}. Press Submit Remaining when ready.`,
                         'warning', 0
                     );
                 } }

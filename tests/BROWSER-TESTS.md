@@ -123,14 +123,14 @@ Expected:
 
 - Notification names what already saved: *"Already saved (not resent): Child
   Parts."* Full detail goes to the console, not the bar.
-- The **Submit button now reads "Send remaining"**.
+- The **Submit button now reads "Submit Remaining"**.
 - The Child Part rows are dimmed with a green edge and **read-only** — click one
   and try to type; it should refuse.
 - Network tab: `add-child-parts` → 200, `add-bo-parts` → 500.
 - In Glide: Child Parts has your rows, BO Parts has nothing.
 
 5. Console → run the **restore snippet above** (not a bare assignment).
-6. Press **Send remaining**.
+6. Press **Submit Remaining**.
 
 Expected — **this is the assertion that matters**:
 
@@ -164,7 +164,7 @@ stale copy of the original attempt.
 2. **Correct** the BO row that failed — change its Quantity to something
    distinctive, e.g. `77`.
 3. **Add a new BO row** — Type BO, a quantity, a part number.
-4. Run the restore snippet, press **Send remaining**.
+4. Run the restore snippet, press **Submit Remaining**.
 5. Network tab → click the `add-bo-parts` request → **Payload** tab (Chrome/Brave)
    or **Request** tab (Safari).
 
