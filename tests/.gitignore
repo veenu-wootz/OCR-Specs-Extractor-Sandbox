@@ -4,4 +4,8 @@ draftcore.js
 submitcore.js
 sendfn.js
 notif.js
+dupes.js
+validate.js
+notifscan.js
 .run.js
+rebuild.js

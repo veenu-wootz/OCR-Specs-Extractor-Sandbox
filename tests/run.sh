@@ -22,6 +22,7 @@ run "suite 6: draft lifecycle" "$D/stubs.js" "$D/s6-draftlifecycle.js" "$D/draft
 run "suite 7: submit validation" "$D/stubs.js" "$D/s7-validateenv.js" "$D/validate.js" "$D/s7-tests.js"
 run "suite 8: duplicate marking" "$D/stubs.js" "$D/s8-dupesenv.js" "$D/dupes.js" "$D/s8-tests.js"
 run "suite 9: first paint"      "$D/stubs.js" "$D/s9-firstpaintenv.js" "$D/notifscan.js" "$D/s9-tests.js"
+run "suite 10: row identity"   "$D/stubs.js" "$D/s10-identityenv.js" "$D/draftcore.js" "$D/submitcore.js" "$D/rebuild.js" "$D/s10-tests.js"
 rm -f "$D/.run.js"
 
 echo; echo "───── render check (real browser)"

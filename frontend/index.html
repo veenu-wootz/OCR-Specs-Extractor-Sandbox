@@ -1703,14 +1703,29 @@ function normalizeRow(rawRow) {
     if (rawRow._needsReview) base._needsReview = true;
     if (rawRow._missingDrawing) base._missingDrawing = true;
     if (typeof rawRow._similarityScore === 'number') base._similarityScore = rawRow._similarityScore;
+    // Identity of a row that has already been written to Glide. Must survive a
+    // restore, or the row would be re-sent.
+    if (rawRow._sentKey) base._sentKey = rawRow._sentKey;
     return base;
 }
 
-// Fingerprint of the content only — never the timestamp. Used both to skip
-// no-op writes and to decide whether a draft has changed since the user last
-// answered the restore prompt.
+// Recomputed on every paint, so they are not user content and must not count
+// as a change. The renderer writes _similarityScore during render, which made
+// every load-then-leave look like an edit and restamped savedAt — so an active
+// draft never aged and the 24h expiry never fired.
+const DERIVED_ROW_FIELDS = ['_similarityScore', '_needsReview'];
+
+// Fingerprint of the content only — never the timestamp. Both sides are put
+// through normalizeRow first so a stored draft and the live table canonicalise
+// identically; comparing raw storage against normalised rows reported a
+// difference that was not there.
 function draftFingerprint(rows, submitState) {
-    return JSON.stringify({ rows, submitState: submitState || null });
+    const canonical = (rows || []).map(r => {
+        const n = normalizeRow(r);
+        DERIVED_ROW_FIELDS.forEach(k => { delete n[k]; });
+        return n;
+    });
+    return JSON.stringify({ rows: canonical, submitState: submitState || null });
 }
 
 let _lastWrittenFingerprint = null;
@@ -1781,16 +1796,30 @@ function describeAge(ms) {
 
 // Rows already written to Glide become read-only — there is no update
 // mutation wired, so an edit here could never reach Glide.
+function sentKeySet() {
+    const keys = new Set();
+    if (!_submitState) return keys;
+    ['childParts', 'boParts'].forEach(k => {
+        (_submitState[k]?.sent || []).forEach(r => { if (r._sentKey) keys.add(r._sentKey); });
+    });
+    return keys;
+}
+
 function recomputeLockedRows() {
     _lockedRows = new Set();
     if (!_submitState) return;
     // Driven by `sent`, not by stage status: a completed stage that has picked
     // up newly added rows goes back to 'todo', but the rows it already wrote to
     // Glide must stay locked.
-    ['childParts', 'boParts'].forEach(stageName => {
-        (_submitState[stageName]?.sent || []).forEach(r => {
-            if (typeof r._pRow === 'number') _lockedRows.add(r._pRow);
-        });
+    //
+    // Located by _sentKey rather than by row position. The key lives on the row
+    // object, so it moves with the row when one is inserted above or deleted;
+    // matching on position meant an insert shifted every index and an
+    // already-saved row was sent to Glide a second time.
+    const sent = sentKeySet();
+    if (!sent.size) return;
+    spreadsheetData.forEach((row, idx) => {
+        if (row && row._sentKey && sent.has(row._sentKey)) _lockedRows.add(idx);
     });
 }
 
@@ -1956,6 +1985,11 @@ function duplicateChildPartRows() {
     spreadsheetData.forEach((row, idx) => {
         if (!row) return;
         const type = (row.Type || "").trim();
+        const qty = row.Quantity?.text?.trim();
+        // Same filter the submit-time check uses. Without it a duplicate on a
+        // row with no quantity raised a sticky error that submitting could not
+        // clear, because that row is never sent and so never blocks.
+        if (!qty || !type) return;
         if (type !== "Child Part" && type !== TYPE_DISPLAY_NAMES["Missing Childpart"]) return;
         const raw = (row["Matched Childpart"] || "").toString().trim();
         if (!raw) return;
@@ -2992,7 +3026,12 @@ if (!_restoredThisLoad) showDefaultInstructions();
                 if (!changes || source === 'CopyPaste.copy') return;
                 scheduleDraftSave();
             });
-            hot.addHook('afterCreateRow', () => scheduleDraftSave());
+            hot.addHook('afterCreateRow', () => {
+                scheduleDraftSave();
+                // Inserting a row moves every row below it; the locks are keyed
+                // to positions, so they have to be re-derived.
+                recomputeLockedRows();
+            });
             hot.addHook('afterRemoveRow', () => {
                 scheduleDraftSave();
                 // Deleting the offending row resolves the issue, but row removal
@@ -3000,6 +3039,7 @@ if (!_restoredThisLoad) showDefaultInstructions();
                 // hold or re-evaluated the table — the error stayed on screen.
                 resetNotificationGate();
                 refreshNotifications();
+                recomputeLockedRows();
             });
 
             // --- keep current value when opening Type / Matched Childpart editors
@@ -4273,13 +4313,21 @@ document.addEventListener('DOMContentLoaded', () => {
         // a reload. It must never reach the backend.
         function stripInternal(rows) {
             return (rows || []).map(r => {
-                const { _pRow, ...rest } = r;
+                const { _pRow, _sentKey, ...rest } = r;
                 return rest;
             });
         }
 
         // Build the three stages from the current table. Only called for a FRESH
         // submit — a resume replays the frozen payloads instead.
+        // Stable identity for a row across inserts and deletes. Stored on the row
+        // object so it travels with the row; a position could not.
+        let _sentKeySeq = 0;
+        function ensureSentKey(row) {
+            if (!row._sentKey) row._sentKey = `r${Date.now().toString(36)}-${++_sentKeySeq}`;
+            return row._sentKey;
+        }
+
         function buildSubmitState() {
             const childRows = [];
             const boRows = [];
@@ -4300,6 +4348,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (type === "Child Part" || type === TYPE_DISPLAY_NAMES["Missing Childpart"]) {
                     childRows.push({
                         _pRow: pRow,
+                        _sentKey: ensureSentKey(row),
                         itemNumber: lastOcrBomItem + vRow + 1,
                         quantity: qty,
                         description: row.Description?.text?.trim() || "",
@@ -4313,6 +4362,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else if (type === "BO") {
                     boRows.push({
                         _pRow: pRow,
+                        _sentKey: ensureSentKey(row),
                         itemNumber: lastOcrBomItem + vRow + 1,
                         quantity: qty,
                         description: row.Description?.text?.trim() || "",
@@ -4360,7 +4410,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const st = _submitState?.[stageName];
                 if (!st) return;
                 (st.sent || []).forEach(sent => {
-                    const row = spreadsheetData[sent._pRow];
+                    const row = sent._sentKey
+                        ? spreadsheetData.find(r => r && r._sentKey === sent._sentKey)
+                        : spreadsheetData[sent._pRow];
                     if (!row) return;
                     const nowQty = row.Quantity?.text?.trim() || "";
                     const nowDesc = row.Description?.text?.trim() || "";
@@ -4411,9 +4463,9 @@ document.addEventListener('DOMContentLoaded', () => {
             // rows are then treated as new — they get fresh item numbers rather
             // than silently inheriting someone else's.
             const remap = (rows, prevRows) => {
-                const byRow = new Map((prevRows || []).map(r => [r._pRow, r]));
+                const byKey = new Map((prevRows || []).filter(r => r._sentKey).map(r => [r._sentKey, r]));
                 return rows.map(r => {
-                    const prev = byRow.get(r._pRow);
+                    const prev = byKey.get(r._sentKey);
                     if (prev) return { ...r, itemNumber: prev.itemNumber };
                     do { nextItem += 1; } while (used.has(nextItem));
                     used.add(nextItem);
@@ -4429,8 +4481,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const st = _submitState[k];
                 if (!st) return;
                 const alreadySent = new Set((st.sent || [])
-                    .map(r => r._pRow).filter(n => typeof n === 'number'));
-                const outstanding = (fresh[k].payload || []).filter(r => !alreadySent.has(r._pRow));
+                    .map(r => r._sentKey).filter(Boolean));
+                const outstanding = (fresh[k].payload || []).filter(r => !alreadySent.has(r._sentKey));
                 st.payload = remap(outstanding, st.payload);
 
                 if (!st.payload.length) {
@@ -4713,8 +4765,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 clearNotificationActions();
+                // force: a warning from the unfinished-submission modal is sticky
+                // and outranks a success, so without this a completed Submit
+                // Remaining showed no confirmation and left the stale warning up.
                 showNotification(
-                    `Data added successfully!\n- Child Parts: ${childPartsPayload.length}\n- BO Parts: ${boPartsPayload.length}`, 'success'
+                    `Data added successfully!\n- Child Parts: ${childPartsPayload.length}\n- BO Parts: ${boPartsPayload.length}`,
+                    'success', 5000, { force: true }
                 );
                 // Unlock first: hot.clear() will not touch readOnly cells, so
                 // clearing while rows are still locked would leave data behind.
